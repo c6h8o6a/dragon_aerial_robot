@@ -26,9 +26,21 @@ void DynamixelSerial::init(UART_HandleTypeDef* huart, osMutexId* mutex)
 	get_move_tick_ = 0;
 	get_error_tick_ = 0;
 
+<<<<<<< HEAD:aerial_robot_nerve/spinal/mcu_project/lib/Jsk_Lib/servo/drivers/Dynamixel/dynamixel_serial.cpp
   direct_ttl_mode_ = false;
 
         /* rx */
+=======
+  pinReconfig();
+
+        /* rx */
+  __HAL_UART_DISABLE_IT(huart, UART_IT_PE);
+  __HAL_UART_DISABLE_IT(huart, UART_IT_ERR);
+  #if DYNAMIXEL_BOARDLESS_CONTROL
+    HAL_HalfDuplex_EnableReceiver(huart_);
+  #endif
+  HAL_UART_Receive_DMA(huart, rx_buf_, RX_BUFFER_SIZE);
+>>>>>>> d57206a4b0cad08b662d042c2c7858da2ac519c3:aerial_robot_nerve/spinal/mcu_project/lib/Jsk_Lib/servo/Dynamixel/dynamixel_serial.cpp
   rd_ptr_ = 0;
   memset(rx_buf_, 0, sizeof(rx_buf_));
 
@@ -110,13 +122,17 @@ void DynamixelSerial::init(UART_HandleTypeDef* huart, osMutexId* mutex)
 
 void DynamixelSerial::pinReconfig()
 {
+<<<<<<< HEAD:aerial_robot_nerve/spinal/mcu_project/lib/Jsk_Lib/servo/drivers/Dynamixel/dynamixel_serial.cpp
   // scan uart mode
+=======
+>>>>>>> d57206a4b0cad08b662d042c2c7858da2ac519c3:aerial_robot_nerve/spinal/mcu_project/lib/Jsk_Lib/servo/Dynamixel/dynamixel_serial.cpp
   while(HAL_UART_DeInit(huart_) != HAL_OK);
   /*Change baud rate*/
   huart_->Init.BaudRate = 1000000;
   huart_->Init.WordLength = UART_WORDLENGTH_8B;
   huart_->Init.Parity = UART_PARITY_NONE;
   huart_->Init.Mode = UART_MODE_TX_RX;
+<<<<<<< HEAD:aerial_robot_nerve/spinal/mcu_project/lib/Jsk_Lib/servo/drivers/Dynamixel/dynamixel_serial.cpp
   while(HAL_UART_Init(huart_) != HAL_OK);
 
   __HAL_UART_DISABLE_IT(huart_, UART_IT_PE);
@@ -192,6 +208,13 @@ void DynamixelSerial::pinReconfig()
   GPIO_InitStruct.Alternate = GPIO_AF7_USART3;
   HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
 #endif
+=======
+  /*Initialize as halfduplex mode*/
+#if DYNAMIXEL_BOARDLESS_CONTROL
+  while(HAL_HalfDuplex_Init(huart_) != HAL_OK);  
+#else 
+  while(HAL_UART_Init(huart_) != HAL_OK);
+>>>>>>> d57206a4b0cad08b662d042c2c7858da2ac519c3:aerial_robot_nerve/spinal/mcu_project/lib/Jsk_Lib/servo/Dynamixel/dynamixel_serial.cpp
 #endif
 }
 
@@ -618,9 +641,28 @@ void DynamixelSerial::transmitInstructionPacket(uint8_t id, uint16_t len, uint8_
   transmit_data_index++;
 
   /* send data */
+<<<<<<< HEAD:aerial_robot_nerve/spinal/mcu_project/lib/Jsk_Lib/servo/drivers/Dynamixel/dynamixel_serial.cpp
   if(direct_ttl_mode_)  HAL_HalfDuplex_EnableTransmitter(huart_);
 
   HAL_UART_Transmit(huart_, transmit_data, transmit_data_index, 10); //timeout: 10 ms. Although we found 2 ms is enough OK for our case by oscilloscope. Large value is better for UART async task in RTOS.
+=======
+
+#if DYNAMIXEL_BOARDLESS_CONTROL
+  HAL_HalfDuplex_EnableTransmitter(huart_);
+  uint8_t ret;
+  ret = HAL_UART_Transmit(huart_, transmit_data, transmit_data_index, 10); //timeout: 10 ms. Although we found 2 ms is enough OK for our case by oscilloscope. Large value is better for UART async task in RTOS.
+  if(ret == HAL_OK)
+  {
+    while (__HAL_UART_GET_FLAG(huart_, UART_FLAG_TC) == RESET) {}
+    // After transmitting, enable the receiver
+    HAL_HalfDuplex_EnableReceiver(huart_);
+  }
+#else
+// WE; 
+  HAL_UART_Transmit(huart_, transmit_data, transmit_data_index, 10); //timeout: 10 ms. Although we found 2 ms is enough OK for our case by oscilloscope. Large value is better for UART async task in RTOS.
+// RE;
+#endif
+>>>>>>> d57206a4b0cad08b662d042c2c7858da2ac519c3:aerial_robot_nerve/spinal/mcu_project/lib/Jsk_Lib/servo/Dynamixel/dynamixel_serial.cpp
 }
 /* Receive status packet to Dynamixel */
 int8_t DynamixelSerial::readStatusPacket(uint8_t status_packet_instruction)

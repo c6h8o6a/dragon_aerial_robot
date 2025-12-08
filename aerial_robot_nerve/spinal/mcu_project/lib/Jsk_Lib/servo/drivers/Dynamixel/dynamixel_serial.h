@@ -303,8 +303,11 @@ public:
   uint8_t getServoIndex(uint8_t id);
 
 private:
+<<<<<<< HEAD:aerial_robot_nerve/spinal/mcu_project/lib/Jsk_Lib/servo/drivers/Dynamixel/dynamixel_serial.h
   bool direct_ttl_mode_;
 
+=======
+>>>>>>> d57206a4b0cad08b662d042c2c7858da2ac519c3:aerial_robot_nerve/spinal/mcu_project/lib/Jsk_Lib/servo/Dynamixel/dynamixel_serial.h
   RingBufferDx<std::pair<uint8_t, uint8_t>, 64> instruction_buffer_;
 
   // a new and quicker method to read servo data

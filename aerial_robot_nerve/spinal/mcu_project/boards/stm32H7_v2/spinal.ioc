@@ -540,11 +540,20 @@ PD15.Locked=true
 PD15.Signal=S_TIM4_CH4
 PD5.GPIOParameters=GPIO_Speed,GPIO_PuPd,GPIO_ModeDefaultOD
 PD5.GPIO_ModeDefaultOD=GPIO_MODE_AF_PP
+<<<<<<< HEAD
 PD5.GPIO_PuPd=GPIO_NOPULL
+=======
+PD5.GPIO_PuPd=GPIO_PULLUP
+>>>>>>> d57206a4b0cad08b662d042c2c7858da2ac519c3
 PD5.GPIO_Speed=GPIO_SPEED_FREQ_VERY_HIGH
 PD5.Locked=true
 PD5.Mode=Asynchronous
 PD5.Signal=USART2_TX
+<<<<<<< HEAD
+=======
+PD6.GPIOParameters=GPIO_PuPd
+PD6.GPIO_PuPd=GPIO_PULLUP
+>>>>>>> d57206a4b0cad08b662d042c2c7858da2ac519c3
 PD6.Mode=Asynchronous
 PD6.Signal=USART2_RX
 PD8.GPIOParameters=GPIO_Speed,GPIO_ModeDefaultOD
