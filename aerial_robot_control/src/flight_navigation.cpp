@@ -26,7 +26,8 @@ BaseNavigator::BaseNavigator():
   joy_stick_heart_beat_(false),
   joy_stick_prev_time_(0),
   teleop_flag_(true),
-  land_check_start_time_(0)
+  land_check_start_time_(0),
+  once_takeoff_flag_(false)
 {
   setNaviState(ARM_OFF_STATE);
 }
@@ -727,6 +728,11 @@ void BaseNavigator::update()
           }
         if (ros::Time::now().toSec() - hover_convergent_start_time_ > hover_convergent_duration_)
           {
+	    if(!once_takeoff_flag_)
+	      {
+		once_takeoff_flag_ = true;
+		break;
+	      }
             hover_convergent_start_time_ = ros::Time::now().toSec();
             setNaviState(HOVER_STATE);
             ROS_INFO("\n \n ======================  \n Hover!!! \n ====================== \n");
@@ -764,6 +770,7 @@ void BaseNavigator::update()
     case HOVER_STATE:
       {
         if(force_att_control_flag_) break;
+	once_takeoff_flag_ = false;
 
         if(gps_waypoint_)
           {

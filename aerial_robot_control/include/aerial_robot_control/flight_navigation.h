@@ -267,6 +267,8 @@ namespace aerial_robot_navigation
     int  prev_xy_control_mode_;
     bool xy_vel_mode_pos_ctrl_takeoff_;
 
+    bool once_takeoff_flag_;
+
     double loop_du_;
     int  control_frame_;
     int estimate_mode_;
@@ -426,6 +428,9 @@ namespace aerial_robot_navigation
       setNaviState(START_STATE);
       trajectory_mode_ = false;
       setTargetXyFromCurrentState();
+      /*setTargetZFromCurrentState();
+      tf::Vector3 pos_cog = estimator_->getPos(Frame::COG, estimate_mode_);
+      setTargetPosZ(pos_cog.z()+0.3);*/
       setTargetPosZ(takeoff_height_);
       setTargetVelZ(0);
       setTargetAccZ(0);
