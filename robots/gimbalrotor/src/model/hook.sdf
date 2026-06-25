@@ -1,0 +1,49 @@
+<?xml version="1.0"?>
+<sdf version="1.7">
+
+  <model name="hook">
+    <!-- <static>true</static> -->
+    <!-- add_extra_module用接続位置 -->
+    <position>1 0 0</position>
+
+    <link name="hook_tool_link">
+      <!-- Gazebo重心位置 -->	
+      <pose>-3.75e-3 0.03e-3 4.91e-3 0 0 0</pose>
+      <inertial>
+	<mass>0.15126</mass>
+	
+	<inertia>
+	  <ixx>3.4559956e-4</ixx>
+	  <ixy>2.503e-8</ixy>
+	  <ixz>1.0952781e-4</ixz>
+
+	  <iyy>5.980289e-4</iyy>
+	  <iyz>-6.071e-8</iyz>
+
+	  <izz>3.1629344e-4</izz>
+	</inertia>
+      </inertial>
+      <visual name="visual">
+        <geometry>
+          <mesh>
+            <uri>file:///home/newuser/ros/jsk_aerial_robot_ws/src/jsk_aerial_robot/robots/gimbalrotor/src/model/hook_tool.STL</uri>
+            <scale>0.001 0.001 0.001</scale>
+          </mesh>
+        </geometry>
+      </visual>
+
+      <!-- 柄 -->
+      <collision name="shaft_collision">
+	<geometry>
+          <mesh>
+            <uri>file:///home/newuser/ros/jsk_aerial_robot_ws/src/jsk_aerial_robot/robots/gimbalrotor/src/model/hook_tool.STL</uri>
+            <scale>0.001 0.001 0.001</scale>
+          </mesh>
+        </geometry>
+      </collision>
+
+    </link>
+
+  </model>
+
+</sdf>

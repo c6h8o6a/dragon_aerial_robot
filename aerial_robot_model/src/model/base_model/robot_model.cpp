@@ -318,6 +318,7 @@ namespace aerial_robot_model {
     KDL::JntArray dummy_joint_positions(tree_.getNrOfJoints());
     KDL::SetToZero(dummy_joint_positions);
     updateRobotModelImpl(dummy_joint_positions);
+  
   }
 
   void RobotModel::updateRobotModel(const KDL::JntArray& joint_positions)

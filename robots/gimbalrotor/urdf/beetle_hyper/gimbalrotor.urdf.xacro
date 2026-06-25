@@ -102,15 +102,61 @@
               iyy="0.0001" iyz="0.0"
               izz="0.0001"/>
         </inertial>
+
       </link>
+      
       <joint name="cp_base_joint" type="fixed">
         <parent link="base_link"/>
         <child link="contact_point"/>
         <origin rpy="0 0 0" xyz="0.26 0 0"/>
         <axis xyz="0 0 1"/>
+
+	<limit lower="0" upper="0" effort="0" velocity="0"/>
       </joint>    
 
-    <xacro:friction self="base_link"/>
+      <xacro:friction self="base_link"/>
+      
+      <!-- hook tool -->
+      <link name="hook_tool_link">
+	<inertial>
+	  <!-- hook_tool_link原点から見た重心位置 -->
+	  <origin xyz="0 0 0" rpy="0 0 0"/>
+	  <mass value="0.01"/>
+	  <inertia
+	      ixx="8.309234e-4" ixy="-3.962e-8" ixz="5.48e-9"
+	      iyy="3.7551831e-4" iyz="-1.77238e-4"
+	      izz="5.5049843e-4"/>
+	</inertial>
+	<!-- <visual> -->
+	<!--   <origin xyz="0 0 0" rpy="0 0 0"/> -->
+	<!--   <geometry> -->
+	<!--     <mesh filename="package://gimbalrotor/src/model/untitled.stl" -->
+	<!-- 	  scale="0.001 0.001 0.001"/> -->
+	<!--   </geometry> -->
+	<!-- </visual> -->
+
+	<collision>
+	  <origin xyz="0 0 0" rpy="0 0 0"/>
+	  <geometry>
+	    <mesh filename="package://gimbalrotor/src/model/untitled.stl"
+		  scale="0.001 0.001 0.001"/>
+	  </geometry>
+	</collision>
+      </link>
+      
+      <joint name="hook_tool_joint" type="fixed">
+	<parent link="base_link"/>
+	<child link="hook_tool_link"/>
+	<origin xyz="0.2575 0 0.09141" rpy="0 0 0"/>
+      </joint>
+      <gazebo reference="hook_tool_joint">
+	<preserveFixedJoint>true</preserveFixedJoint>
+      </gazebo>
+      <gazebo reference="hook_tool_link">
+	<!-- <preserveFixedJoint>true</preserveFixedJoint> -->
+	<mu1>0.1</mu1>
+	<mu2>0.1</mu2>
+      </gazebo>
   </xacro:macro>
 
   <xacro:macro name="gimbalrotor_thrust_link" params="self rotor_direction">
