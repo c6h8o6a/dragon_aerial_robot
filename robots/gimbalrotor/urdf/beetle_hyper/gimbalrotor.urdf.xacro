@@ -121,7 +121,7 @@
 	<inertial>
 	  <!-- hook_tool_link原点から見た重心位置 -->
 	  <origin xyz="0 0 0" rpy="0 0 0"/>
-	  <mass value="0.01"/>
+	  <mass value="0.0001"/>
 	  <inertia
 	      ixx="8.309234e-4" ixy="-3.962e-8" ixz="5.48e-9"
 	      iyy="3.7551831e-4" iyz="-1.77238e-4"
