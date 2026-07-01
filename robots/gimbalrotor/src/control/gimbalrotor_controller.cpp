@@ -49,6 +49,7 @@ void GimbalrotorController::rosParamInit()
   getParam<bool>(control_nh, "gimbal_calc_in_fc", gimbal_calc_in_fc_, true);
   getParam<bool>(control_nh, "hovering_approximate", hovering_approximate_, false);
   getParam<bool>(control_nh, "underactuate", underactuate_, false);
+  getParam(control_nh, "gravity_comp_rate", gravity_comp_rate_, 0.95);
 }
 
 bool GimbalrotorController::update()
@@ -71,7 +72,7 @@ void GimbalrotorController::controlCore()
   tf::Vector3 target_acc_w(pid_controllers_.at(X).result(), pid_controllers_.at(Y).result(),
                            pid_controllers_.at(Z).result());
   if(navigator_->getNaviState() == aerial_robot_navigation::HOVER_STATE){
-    target_acc_w.setZ(aerial_robot_estimation::G*0.95);}
+    target_acc_w.setZ(aerial_robot_estimation::G*gravity_comp_rate_);}
     
   tf::Vector3 target_acc_dash = (tf::Matrix3x3(tf::createQuaternionFromYaw(rpy_.z()))).inverse() * target_acc_w;
   tf::Vector3 target_acc_cog = uav_rot.inverse() * target_acc_w;

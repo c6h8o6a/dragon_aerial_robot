@@ -48,6 +48,7 @@ private:
   bool gimbal_calc_in_fc_;
   bool underactuate_;
   double target_roll_ = 0.0, target_pitch_ = 0.0;
+  double gravity_comp_rate_;//new
 
   void rosParamInit();
   bool update() override;
