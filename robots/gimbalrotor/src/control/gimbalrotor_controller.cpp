@@ -68,6 +68,12 @@ bool GimbalrotorController::update()
   return PoseLinearController::update();
 }
 
+double smoothStep(double x)
+{
+  x = std::max(0.0, std::min(1.0, x));
+  return x * x * (3.0 - 2.0 * x);
+}
+
 void GimbalrotorController::controlCore()
 {
   PoseLinearController::controlCore();
@@ -85,15 +91,11 @@ void GimbalrotorController::controlCore()
 
     double g = std::clamp(target_acc_w.z(),min_z_acc,max_z_acc);
     target_acc_w.setZ(g);
-
-    // ================================
-    // terrestrial friction compensation
-    // ================================
-    
     const double mu = 0.3;              
-    const double max_friction_acc = 1.5; // m/s^2, 安全上限
+    const double max_friction_acc = 1.0; // m/s^2, 安全上限
     const double vel_eps = 0.03;         // m/s, これ以下なら停止扱い
     const double acc_eps = 1.0e-4;       // 加速度方向のゼロ割り防止
+    const double acc_limit=4;          //上限
     
     // 地面に残っている垂直加速度成分
     double normal_acc = aerial_robot_estimation::G - g;
@@ -114,23 +116,24 @@ void GimbalrotorController::controlCore()
     const double ay = target_acc_w.y();
     const double a_norm = std::sqrt(ax * ax + ay * ay);
 
+    double ratio = (a_norm - acc_eps) / (acc_limit - acc_eps);
+    double friction_scale = smoothStep(ratio); //0~1
     if (friction_acc > 0.0)
       {
 	if (v_norm < vel_eps)
 	  {
 	    // ほぼ停止中
-	    // 速度方向が使えないので、PID/目標加速度方向に補償を足す
+	    // 速度方向が使えないので加速度方向に補償を足す
 	    if (a_norm > acc_eps)
 	      {
-		target_acc_w.setX(target_acc_w.x() + friction_acc * ax / a_norm);
-		target_acc_w.setY(target_acc_w.y() + friction_acc * ay / a_norm);
+		target_acc_w.setX(target_acc_w.x() + friction_scale * friction_acc * ax / a_norm);
+		target_acc_w.setY(target_acc_w.y() + friction_scale * friction_acc * ay / a_norm);
 	      }
 	  }
 	else
 	  {
 	    // 動いているとき
-	    // ただし、PIDが明らかに減速方向を向いているときは、
-	    // 速度方向補償を入れると止まりにくくなるので入れない
+	    // PIDが明らかに減速方向を向いているときは速度方向補償を入れると止まりにくくなるので入れない
 	    const double dot_acc_vel = ax * vx + ay * vy;
 	    
 	    if (dot_acc_vel >= 0.0)
@@ -140,7 +143,12 @@ void GimbalrotorController::controlCore()
 	      }
 	  }
       }
-    
+    target_acc_w.setX(std::clamp(target_acc_w.x(),-acc_limit,acc_limit));
+    target_acc_w.setY(std::clamp(target_acc_w.y(),-acc_limit,acc_limit));
+    // if (a_norm>acc_limit){
+    //   double g = std::clamp(target_acc_w.x(),-acc_limit,acc_limit);
+    //   target_acc_w.setX();  
+    // }
     ROS_INFO_STREAM_THROTTLE(0.5,
 			     "target_acc_w after friction: "
 			     << "x=" << target_acc_w.x()
