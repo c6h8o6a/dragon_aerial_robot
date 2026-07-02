@@ -3,8 +3,8 @@
 
   <model name="hook">
     <!-- <static>true</static> -->
-    <!-- add_extra_module用接続位置 -->
-    <position>1 0 0</position>
+    <!-- add_extra_module用接続位置 base_link to cog to model o 0.021+0.29056 0.001+0.00046 0.078+0.02746 -->
+    <position>0.31156 0.00146 0.10546</position>
 
     <link name="hook_tool_link">
       <!-- Gazebo重心位置 -->	

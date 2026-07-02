@@ -36,7 +36,7 @@ class TrrAssembly():
         self.phase3_sent=False
         self.target=np.zeros(3)
         self.targetyaw=0
-        self.duration=3
+        self.duration=0.5
         
         self.phase3_start = None
         self.ctrl_mode_pub = rospy.Publisher("/gimbalrotor/teleop_command/ctrl_mode",Int8,queue_size=1)
@@ -99,7 +99,7 @@ class TrrAssembly():
                 for i in range(40):
                   self.flight_nav_msg.header.stamp = rospy.Time.now()
                   self.nav_pub.publish(self.flight_nav_msg)
-            print("2",self.target,self.flight_nav_msg.pos_xy_nav_mode)
+            print("2",self.target,self.gimbalrotor_position)
             for i in range(40):
                   self.flight_nav_msg.header.stamp = rospy.Time.now()
                   self.nav_pub.publish(self.flight_nav_msg)
@@ -222,7 +222,8 @@ class TrrAssembly():
 
     
     def reset_before_start(self):
-        while (not self.got_self or not self.got_hook) and not rospy.is_shutdown():
+        while (not self.got_self # or not self.got_hook
+               ) and not rospy.is_shutdown():
             print("waiting odom/hook...")
             self.rate.sleep()
 

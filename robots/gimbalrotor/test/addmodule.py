@@ -36,7 +36,7 @@ def spawn_object(module_name, model_path, link_name):
             position_x, position_y, position_z = position_values[0:3]
     
             pose = Point(x, y, z)
-            position = Point(position_x, position_y, position_z)
+            position = Point(x-0.2575,y,z-0.09141)#0.2575 0 0.09141Point(position_x, position_y, position_z)
             orientation = euler_to_quaternion(roll, pitch, yaw)
             initial_pose = Pose(pose, orientation)
             initial_position = Pose(position, orientation)            
@@ -145,7 +145,7 @@ def main():
         print("\033[1mSelect parent link, plus or minus: \033[0m")
         link = input().strip().lower()
         if link == "plus":
-            link_name = "gimbal_link1"
+            link_name = "base_link"
             break
         elif link == "minus":
             link_name = "base_link"
