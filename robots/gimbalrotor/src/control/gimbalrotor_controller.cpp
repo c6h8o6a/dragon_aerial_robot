@@ -1,4 +1,6 @@
 #include <gimbalrotor/control/gimbalrotor_controller.h>
+#include <algorithm>
+#include <cmath>
 
 using namespace std;
 
@@ -49,7 +51,8 @@ void GimbalrotorController::rosParamInit()
   getParam<bool>(control_nh, "gimbal_calc_in_fc", gimbal_calc_in_fc_, true);
   getParam<bool>(control_nh, "hovering_approximate", hovering_approximate_, false);
   getParam<bool>(control_nh, "underactuate", underactuate_, false);
-  getParam(control_nh, "gravity_comp_rate", gravity_comp_rate_, 0.95);
+  getParam(control_nh, "gravity_comp_rate_min", gravity_comp_rate_min_, 0.3);
+  getParam(control_nh, "gravity_comp_rate_max", gravity_comp_rate_max_, 0.6);
 }
 
 bool GimbalrotorController::update()
@@ -72,7 +75,81 @@ void GimbalrotorController::controlCore()
   tf::Vector3 target_acc_w(pid_controllers_.at(X).result(), pid_controllers_.at(Y).result(),
                            pid_controllers_.at(Z).result());
   if(navigator_->getNaviState() == aerial_robot_navigation::HOVER_STATE){
-    target_acc_w.setZ(aerial_robot_estimation::G*gravity_comp_rate_);}
+    // double g=std::clamp(target_acc_w.z(), aerial_robot_estimation::G*gravity_comp_rate_min_, aerial_robot_estimation::G*gravity_comp_rate_max_)
+    // target_acc_w.setZ(g);
+    // (aerial_robot_estimation::G-g)*0.3;
+
+    // Z方向補償を範囲内に制限
+    const double min_z_acc = aerial_robot_estimation::G * gravity_comp_rate_min_;
+    const double max_z_acc = aerial_robot_estimation::G * gravity_comp_rate_max_;
+
+    double g = std::clamp(target_acc_w.z(),min_z_acc,max_z_acc);
+    target_acc_w.setZ(g);
+
+    // ================================
+    // terrestrial friction compensation
+    // ================================
+    
+    const double mu = 0.3;              
+    const double max_friction_acc = 1.5; // m/s^2, 安全上限
+    const double vel_eps = 0.03;         // m/s, これ以下なら停止扱い
+    const double acc_eps = 1.0e-4;       // 加速度方向のゼロ割り防止
+    
+    // 地面に残っている垂直加速度成分
+    double normal_acc = aerial_robot_estimation::G - g;
+    normal_acc = std::max(0.0, normal_acc);
+
+    // 摩擦を打ち消すために足す加速度
+    double friction_acc = mu * normal_acc;
+    friction_acc = std::min(friction_acc, max_friction_acc);
+
+    // 現在のCoG速度 world frame
+    tf::Vector3 vel_w = estimator_->getVel(Frame::COG, estimate_mode_);
+
+    const double vx = vel_w.x();
+    const double vy = vel_w.y();
+    const double v_norm = std::sqrt(vx * vx + vy * vy);
+
+    const double ax = target_acc_w.x();
+    const double ay = target_acc_w.y();
+    const double a_norm = std::sqrt(ax * ax + ay * ay);
+
+    if (friction_acc > 0.0)
+      {
+	if (v_norm < vel_eps)
+	  {
+	    // ほぼ停止中
+	    // 速度方向が使えないので、PID/目標加速度方向に補償を足す
+	    if (a_norm > acc_eps)
+	      {
+		target_acc_w.setX(target_acc_w.x() + friction_acc * ax / a_norm);
+		target_acc_w.setY(target_acc_w.y() + friction_acc * ay / a_norm);
+	      }
+	  }
+	else
+	  {
+	    // 動いているとき
+	    // ただし、PIDが明らかに減速方向を向いているときは、
+	    // 速度方向補償を入れると止まりにくくなるので入れない
+	    const double dot_acc_vel = ax * vx + ay * vy;
+	    
+	    if (dot_acc_vel >= 0.0)
+	      {
+		target_acc_w.setX(target_acc_w.x() + friction_acc * vx / v_norm);
+		target_acc_w.setY(target_acc_w.y() + friction_acc * vy / v_norm);
+	      }
+	  }
+      }
+    
+    ROS_INFO_STREAM_THROTTLE(0.5,
+			     "target_acc_w after friction: "
+			     << "x=" << target_acc_w.x()
+			     << ", y=" << target_acc_w.y()
+			     << ", z=" << target_acc_w.z()
+			     << ", vel=(" << vx << ", " << vy << ")"
+			     << ", friction_acc=" << friction_acc
+			     << ", normal_acc=" << normal_acc);
+  }
     
   tf::Vector3 target_acc_dash = (tf::Matrix3x3(tf::createQuaternionFromYaw(rpy_.z()))).inverse() * target_acc_w;
   tf::Vector3 target_acc_cog = uav_rot.inverse() * target_acc_w;
