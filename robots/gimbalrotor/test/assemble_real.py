@@ -12,6 +12,7 @@ from nav_msgs.msg import Odometry
 from tf.transformations import euler_from_quaternion
 from gazebo_msgs.msg import ModelStates
 from std_msgs.msg import Int8
+from spinal.msg import ServoControlCmd
 
 
 class TrrAssembly():
@@ -23,6 +24,7 @@ class TrrAssembly():
         self.nav_pub = rospy.Publisher("/gimbalrotor/uav/nav", FlightNav, queue_size=1)
         self.gimbalrotor_pose_sub = rospy.Subscriber("/gimbalrotor/uav/cog/odom",Odometry, self.poseCb_self)
         self.hook_pose_sub=rospy.Subscriber("/gazebo/model_states",ModelStates,self.hookCb)
+        self.servo_target_pub = rospy.Publisher("/gimbalrotor/servo/target_states",ServoControlCmd,queue_size=1)
         self.gimbalrotor_position = np.zeros(3) #[x, y, z]
         self.gimbalrotor_attitude = np.zeros(3) #[roll, pitch, yaw]
         self.hook_position=np.zeros(3)
@@ -36,7 +38,7 @@ class TrrAssembly():
         self.phase3_sent=False
         self.target=np.zeros(3)
         self.targetyaw=0
-        self.duration=0.5
+        self.duration=3
         
         self.phase3_start = None
         self.ctrl_mode_pub = rospy.Publisher("/gimbalrotor/teleop_command/ctrl_mode",Int8,queue_size=1)
@@ -51,6 +53,7 @@ class TrrAssembly():
 
     def main(self):
         self.reset_before_start()
+        self.publish_servo_angles([4],[2048],20)
         while not rospy.is_shutdown():
           rot = np.array([[np.cos(math.pi/2), -np.sin(math.pi/2),0],
                              [np.sin(math.pi/2), np.cos(math.pi/2),0],
@@ -103,7 +106,7 @@ class TrrAssembly():
             for i in range(40):
                   self.flight_nav_msg.header.stamp = rospy.Time.now()
                   self.nav_pub.publish(self.flight_nav_msg)
-            if self.lateral_error_to_line(self.gimbalrotor_position,self.target, self.hook_position)<0.05 and  self.angle_diff(self.gimbalrotor_attitude[2],self.flight_nav_msg.target_yaw)<self.yawdiff and (self.gimbalrotor_position[0]-self.target[0])**2 + (self.gimbalrotor_position[1]-self.target[1])**2<0.1:
+            if self.lateral_error_to_line(self.gimbalrotor_position,self.target, self.hook_position)<0.02 and  self.angle_diff(self.gimbalrotor_attitude[2],self.flight_nav_msg.target_yaw)<self.yawdiff and (self.gimbalrotor_position[0]-self.target[0])**2 + (self.gimbalrotor_position[1]-self.target[1])**2<0.1:
               # (self.gimbalrotor_position[0]-self.flight_nav_msg.target_pos_x)**2 + (self.gimbalrotor_position[1]-self.flight_nav_msg.target_pos_y)**2<(0.1)**2  
               #self.angle_diff(self.ninja1_attitude[2],self.targetyaw)<self.yawdiff
               # self.flight_nav_msg.target_yaw = self.ninja2_attitude[2]
@@ -192,6 +195,14 @@ class TrrAssembly():
         self.gimbalrotor_position[1] = msg.pose.pose.position.y
         self.gimbalrotor_attitude[2] = yaw
         self.got_self = True
+    def publish_servo_angles(self, indices, angles, repeat=20):
+        msg = ServoControlCmd()
+        msg.index = indices
+        msg.angles = angles
+        for i in range(repeat):
+            self.servo_target_pub.publish(msg)
+            self.rate.sleep()
+        
     def angle_diff(self,a, b):
       d = a - b
       return abs(math.atan2(math.sin(d), math.cos(d)))
@@ -240,11 +251,12 @@ class TrrAssembly():
             msg.target = FlightNav.COG
             msg.control_frame = FlightNav.WORLD_FRAME
             msg.pos_xy_nav_mode = FlightNav.POS_MODE
-            msg.pos_z_nav_mode = FlightNav.NO_NAVIGATION
+            msg.pos_z_nav_mode = FlightNav.NO_NAVIGATION #FlightNav.POS_MODE
             msg.yaw_nav_mode = FlightNav.POS_MODE
             
             msg.target_pos_x = self.gimbalrotor_position[0]
             msg.target_pos_y = self.gimbalrotor_position[1]
+            #msg.target_pos_z = self.gimbalrotor_position[2]#add
             msg.target_yaw = self.gimbalrotor_attitude[2]
 
 
@@ -254,6 +266,7 @@ class TrrAssembly():
                 self.rate.sleep()
                 self.flight_nav_msg = msg
                 print("reset before start done")
+  
 if __name__ == "__main__":
     rospy.init_node("trr_assembly_node")
     trr_assembly = TrrAssembly()
