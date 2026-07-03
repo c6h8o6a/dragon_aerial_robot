@@ -74,6 +74,40 @@ double smoothStep(double x)
   return x * x * (3.0 - 2.0 * x);
 }
 
+Eigen::Vector3d calcFstar(
+    const Eigen::Vector2d& acc_xy_cmd,
+    const Eigen::Vector2d& d_hat,
+    double mu,double limit_min,double limit_max)
+{
+  double g = aerial_robot_estimation::G;
+  // A_mu: 2 x 3
+  Eigen::Matrix<double, 2, 3> A_mu;
+  A_mu << 1.0, 0.0, mu * d_hat.x(),
+          0.0, 1.0, mu * d_hat.y();
+
+  // b = m a_xy_cmd + mu m g d_hat
+  Eigen::Vector2d b;
+  b = acc_xy_cmd + mu * g * d_hat;
+
+  // F* = A^T (A A^T)^-1 b
+  Eigen::Matrix2d AAT = A_mu * A_mu.transpose();
+
+  Eigen::Vector2d lambda = AAT.ldlt().solve(b);
+
+  Eigen::Vector3d F_star = A_mu.transpose() * lambda;
+  if(F_star.z()>limit_max){
+    F_star.z() = limit_max;
+    F_star.x() = b.x() - mu * d_hat.x() * F_star.z();
+    F_star.y() = b.y() - mu * d_hat.y() * F_star.z();
+  }
+  else if (F_star.z()<limit_min){
+    F_star.z() = limit_min;
+    F_star.x() = b.x() - mu * d_hat.x() * F_star.z();
+    F_star.y() = b.y() - mu * d_hat.y() * F_star.z();
+  }
+  return F_star;
+}
+  
 void GimbalrotorController::controlCore()
 {
   PoseLinearController::controlCore();
@@ -89,21 +123,21 @@ void GimbalrotorController::controlCore()
     const double min_z_acc = aerial_robot_estimation::G * gravity_comp_rate_min_;
     const double max_z_acc = aerial_robot_estimation::G * gravity_comp_rate_max_;
 
-    double g = std::clamp(target_acc_w.z(),min_z_acc,max_z_acc);
-    target_acc_w.setZ(g);
+    // double g = std::clamp(target_acc_w.z(),min_z_acc,max_z_acc);
+    // target_acc_w.setZ(g);
     const double mu = 0.3;              
     const double max_friction_acc = 1.0; // m/s^2, 安全上限
     const double vel_eps = 0.03;         // m/s, これ以下なら停止扱い
-    const double acc_eps = 1.0e-4;       // 加速度方向のゼロ割り防止
+    const double acc_eps = 0.3;       // 加速度方向のゼロ割り防止
     const double acc_limit=4;          //上限
     
-    // 地面に残っている垂直加速度成分
-    double normal_acc = aerial_robot_estimation::G - g;
-    normal_acc = std::max(0.0, normal_acc);
+    // // 地面に残っている垂直加速度成分
+    // double normal_acc = aerial_robot_estimation::G - g;
+    // normal_acc = std::max(0.0, normal_acc);
 
-    // 摩擦を打ち消すために足す加速度
-    double friction_acc = mu * normal_acc;
-    friction_acc = std::min(friction_acc, max_friction_acc);
+    // // 摩擦を打ち消すために足す加速度
+    // double friction_acc = mu * normal_acc;
+    // friction_acc = std::min(friction_acc, max_friction_acc);
 
     // 現在のCoG速度 world frame
     tf::Vector3 vel_w = estimator_->getVel(Frame::COG, estimate_mode_);
@@ -116,47 +150,76 @@ void GimbalrotorController::controlCore()
     const double ay = target_acc_w.y();
     const double a_norm = std::sqrt(ax * ax + ay * ay);
 
-    double ratio = (a_norm - acc_eps) / (acc_limit - acc_eps);
-    double friction_scale = smoothStep(ratio); //0~1
-    if (friction_acc > 0.0)
-      {
-	if (v_norm < vel_eps)
-	  {
-	    // ほぼ停止中
-	    // 速度方向が使えないので加速度方向に補償を足す
-	    if (a_norm > acc_eps)
-	      {
-		target_acc_w.setX(target_acc_w.x() + friction_scale * friction_acc * ax / a_norm);
-		target_acc_w.setY(target_acc_w.y() + friction_scale * friction_acc * ay / a_norm);
-	      }
-	  }
-	else
-	  {
-	    // 動いているとき
-	    // PIDが明らかに減速方向を向いているときは速度方向補償を入れると止まりにくくなるので入れない
-	    const double dot_acc_vel = ax * vx + ay * vy;
-	    
-	    if (dot_acc_vel >= 0.0)
-	      {
-		target_acc_w.setX(target_acc_w.x() + friction_acc * vx / v_norm);
-		target_acc_w.setY(target_acc_w.y() + friction_acc * vy / v_norm);
-	      }
-	  }
+    // 目標水平加速度 [ax, ay]
+    Eigen::Vector2d acc_xy_cmd;
+    acc_xy_cmd <<ax,ay;  
+
+    // 摩擦方向 d_hat
+    Eigen::Vector2d d_hat;
+    if (v_norm>vel_eps){
+      d_hat << vx/v_norm,vy/v_norm;
+    }
+    else{
+      if(a_norm>acc_eps){
+	d_hat << ax/a_norm,ay/a_norm;
       }
-    target_acc_w.setX(std::clamp(target_acc_w.x(),-acc_limit,acc_limit));
-    target_acc_w.setY(std::clamp(target_acc_w.y(),-acc_limit,acc_limit));
+      else{
+	d_hat << 0,0;
+      }
+    }
+
+    Eigen::Vector3d F_star = calcFstar(acc_xy_cmd, d_hat, mu,min_z_acc,max_z_acc);
+    
+    std::cout << "F_star = \n" << F_star << std::endl;
+    std::cout << "Fx = " << F_star.x() << " N" << std::endl;
+    std::cout << "Fy = " << F_star.y() << " N" << std::endl;
+    std::cout << "Fz = " << F_star.z() << " N" << std::endl;
+
+    target_acc_w.setX(std::clamp(F_star.x(),-acc_limit,acc_limit));
+    target_acc_w.setY(std::clamp(F_star.y(),-acc_limit,acc_limit));
+    target_acc_w.setZ(std::clamp(F_star.z(),min_z_acc,max_z_acc));
+  
+    // double ratio = (a_norm - acc_eps) / (acc_limit - acc_eps);
+    // double friction_scale = smoothStep(ratio); //0~1
+    // if (friction_acc > 0.0)
+    //   {
+    // 	if (v_norm < vel_eps)
+    // 	  {
+    // 	    // ほぼ停止中
+    // 	    // 速度方向が使えないので加速度方向に補償を足す
+    // 	    if (a_norm > acc_eps)
+    // 	      {
+    // 		target_acc_w.setX(target_acc_w.x() + friction_scale * friction_acc * ax / a_norm);
+    // 		target_acc_w.setY(target_acc_w.y() + friction_scale * friction_acc * ay / a_norm);
+    // 	      }
+    // 	  }
+    // 	else
+    // 	  {
+    // 	    // 動いているとき
+    // 	    // PIDが明らかに減速方向を向いているときは速度方向補償を入れると止まりにくくなるので入れない
+    // 	    const double dot_acc_vel = ax * vx + ay * vy;
+	    
+    // 	    if (dot_acc_vel >= 0.0)
+    // 	      {
+    // 		target_acc_w.setX(target_acc_w.x() + friction_acc * vx / v_norm);
+    // 		target_acc_w.setY(target_acc_w.y() + friction_acc * vy / v_norm);
+    // 	      }
+    // 	  }
+    //   }
+    // target_acc_w.setX(std::clamp(target_acc_w.x(),-acc_limit,acc_limit));
+    // target_acc_w.setY(std::clamp(target_acc_w.y(),-acc_limit,acc_limit));
     // if (a_norm>acc_limit){
     //   double g = std::clamp(target_acc_w.x(),-acc_limit,acc_limit);
     //   target_acc_w.setX();  
     // }
-    ROS_INFO_STREAM_THROTTLE(0.5,
-			     "target_acc_w after friction: "
-			     << "x=" << target_acc_w.x()
-			     << ", y=" << target_acc_w.y()
-			     << ", z=" << target_acc_w.z()
-			     << ", vel=(" << vx << ", " << vy << ")"
-			     << ", friction_acc=" << friction_acc
-			     << ", normal_acc=" << normal_acc);
+    // ROS_INFO_STREAM_THROTTLE(0.5,
+    // 			     "target_acc_w after friction: "
+    // 			     << "x=" << target_acc_w.x()
+    // 			     << ", y=" << target_acc_w.y()
+    // 			     << ", z=" << target_acc_w.z()
+    // 			     << ", vel=(" << vx << ", " << vy << ")"
+    // 			     << ", friction_acc=" << friction_acc
+    // 			     << ", normal_acc=" << normal_acc);
   }
     
   tf::Vector3 target_acc_dash = (tf::Matrix3x3(tf::createQuaternionFromYaw(rpy_.z()))).inverse() * target_acc_w;
