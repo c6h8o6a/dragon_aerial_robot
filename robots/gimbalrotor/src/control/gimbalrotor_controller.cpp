@@ -125,7 +125,7 @@ void GimbalrotorController::controlCore()
 
     // double g = std::clamp(target_acc_w.z(),min_z_acc,max_z_acc);
     // target_acc_w.setZ(g);
-    const double mu = 0.3;              
+    double mu = 0.0;              
     const double max_friction_acc = 1.0; // m/s^2, 安全上限
     const double vel_eps = 0.03;         // m/s, これ以下なら停止扱い
     const double acc_eps = 0.3;       // 加速度方向のゼロ割り防止
@@ -158,10 +158,12 @@ void GimbalrotorController::controlCore()
     Eigen::Vector2d d_hat;
     if (v_norm>vel_eps){
       d_hat << vx/v_norm,vy/v_norm;
+      mu=0.3;
     }
     else{
       if(a_norm>acc_eps){
 	d_hat << ax/a_norm,ay/a_norm;
+	mu=0.5;
       }
       else{
 	d_hat << 0,0;
