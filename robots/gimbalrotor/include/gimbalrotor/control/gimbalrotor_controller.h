@@ -48,8 +48,6 @@ private:
   bool gimbal_calc_in_fc_;
   bool underactuate_;
   double target_roll_ = 0.0, target_pitch_ = 0.0;
-  double gravity_comp_rate_min_;//new
-  double gravity_comp_rate_max_;//new
 
   void rosParamInit();
   bool update() override;
@@ -60,5 +58,13 @@ private:
   void sendGimbalCommand();
   void sendTorqueAllocationMatrixInv();
   void setAttitudeGains();
+protected:
+  bool use_ground_qp_;
+  double ground_mu_static_;
+  double ground_mu_kinetic_;
+  double ground_rolling_resistance_;
+  double ground_normal_force_rate_;
+  double ground_vel_eps_;
+  double ground_acc_eps_;
 };
 };  // namespace aerial_robot_control

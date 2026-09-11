@@ -26,6 +26,9 @@ while True:
     if name=="hook":
         x,y,z=0,1,0.0545+0.091
         roll, pitch, yaw = 0.0, 0.0, -math.pi / 2
+    elif name=="hook2":
+        x,y,z=0,1,0.091+0.05529
+        roll, pitch, yaw = 0.0, 0.0, -math.pi / 2
     elif name=="box":
         x,y,z=0,1.2,0.0455
         roll, pitch, yaw = 0.0, 0.0, 0.0

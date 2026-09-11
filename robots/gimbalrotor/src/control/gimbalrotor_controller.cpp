@@ -1,6 +1,7 @@
 #include <gimbalrotor/control/gimbalrotor_controller.h>
 #include <algorithm>
 #include <cmath>
+#include <proxsuite/proxqp/dense/dense.hpp>
 
 using namespace std;
 
@@ -51,8 +52,22 @@ void GimbalrotorController::rosParamInit()
   getParam<bool>(control_nh, "gimbal_calc_in_fc", gimbal_calc_in_fc_, true);
   getParam<bool>(control_nh, "hovering_approximate", hovering_approximate_, false);
   getParam<bool>(control_nh, "underactuate", underactuate_, false);
-  getParam(control_nh, "gravity_comp_rate_min", gravity_comp_rate_min_, 0.3);
-  getParam(control_nh, "gravity_comp_rate_max", gravity_comp_rate_max_, 0.6);
+  //QP
+  getParam<bool>(control_nh, "use_ground_qp",
+                 use_ground_qp_, false);
+  getParam<double>(control_nh, "ground_mu_static",
+                   ground_mu_static_, 0.5);
+  getParam<double>(control_nh, "ground_mu_kinetic",
+                   ground_mu_kinetic_, 0.3);
+  getParam<double>(control_nh, "ground_rolling_resistance",
+                 ground_rolling_resistance_, 0.0);
+  // N_min = ground_normal_force_rate * mg
+  getParam<double>(control_nh, "ground_normal_force_rate",
+                   ground_normal_force_rate_, 0.1);
+  getParam<double>(control_nh, "ground_vel_eps",
+                   ground_vel_eps_, 0.03);
+  getParam<double>(control_nh, "ground_acc_eps",
+                   ground_acc_eps_, 0.3);
 }
 
 bool GimbalrotorController::update()
@@ -114,115 +129,8 @@ void GimbalrotorController::controlCore()
   tf::Matrix3x3 uav_rot = estimator_->getOrientation(Frame::COG, estimate_mode_);
   tf::Vector3 target_acc_w(pid_controllers_.at(X).result(), pid_controllers_.at(Y).result(),
                            pid_controllers_.at(Z).result());
-  if(navigator_->getNaviState() == aerial_robot_navigation::HOVER_STATE){
-    // double g=std::clamp(target_acc_w.z(), aerial_robot_estimation::G*gravity_comp_rate_min_, aerial_robot_estimation::G*gravity_comp_rate_max_)
-    // target_acc_w.setZ(g);
-    // (aerial_robot_estimation::G-g)*0.3;
-
-    // Z方向補償を範囲内に制限
-    const double min_z_acc = aerial_robot_estimation::G * gravity_comp_rate_min_;
-    const double max_z_acc = aerial_robot_estimation::G * gravity_comp_rate_max_;
-
-    // double g = std::clamp(target_acc_w.z(),min_z_acc,max_z_acc);
-    // target_acc_w.setZ(g);
-    double mu = 0.0;              
-    const double max_friction_acc = 1.0; // m/s^2, 安全上限
-    const double vel_eps = 0.03;         // m/s, これ以下なら停止扱い
-    const double acc_eps = 0.3;       // 加速度方向のゼロ割り防止
-    const double acc_limit=4;          //上限
-    
-    // // 地面に残っている垂直加速度成分
-    // double normal_acc = aerial_robot_estimation::G - g;
-    // normal_acc = std::max(0.0, normal_acc);
-
-    // // 摩擦を打ち消すために足す加速度
-    // double friction_acc = mu * normal_acc;
-    // friction_acc = std::min(friction_acc, max_friction_acc);
-
-    // 現在のCoG速度 world frame
-    tf::Vector3 vel_w = estimator_->getVel(Frame::COG, estimate_mode_);
-
-    const double vx = vel_w.x();
-    const double vy = vel_w.y();
-    const double v_norm = std::sqrt(vx * vx + vy * vy);
-
-    const double ax = target_acc_w.x();
-    const double ay = target_acc_w.y();
-    const double a_norm = std::sqrt(ax * ax + ay * ay);
-
-    // 目標水平加速度 [ax, ay]
-    Eigen::Vector2d acc_xy_cmd;
-    acc_xy_cmd <<ax,ay;  
-
-    // 摩擦方向 d_hat
-    Eigen::Vector2d d_hat;
-    if (v_norm>vel_eps){
-      d_hat << vx/v_norm,vy/v_norm;
-      mu=0.3;
-    }
-    else{
-      if(a_norm>acc_eps){
-	d_hat << ax/a_norm,ay/a_norm;
-	mu=0.5;
-      }
-      else{
-	d_hat << 0,0;
-      }
-    }
-
-    Eigen::Vector3d F_star = calcFstar(acc_xy_cmd, d_hat, mu,min_z_acc,max_z_acc);
-    
-    std::cout << "F_star = \n" << F_star << std::endl;
-    std::cout << "Fx = " << F_star.x() << " N" << std::endl;
-    std::cout << "Fy = " << F_star.y() << " N" << std::endl;
-    std::cout << "Fz = " << F_star.z() << " N" << std::endl;
-
-    target_acc_w.setX(std::clamp(F_star.x(),-acc_limit,acc_limit));
-    target_acc_w.setY(std::clamp(F_star.y(),-acc_limit,acc_limit));
-    target_acc_w.setZ(std::clamp(F_star.z(),min_z_acc,max_z_acc));
-  
-    // double ratio = (a_norm - acc_eps) / (acc_limit - acc_eps);
-    // double friction_scale = smoothStep(ratio); //0~1
-    // if (friction_acc > 0.0)
-    //   {
-    // 	if (v_norm < vel_eps)
-    // 	  {
-    // 	    // ほぼ停止中
-    // 	    // 速度方向が使えないので加速度方向に補償を足す
-    // 	    if (a_norm > acc_eps)
-    // 	      {
-    // 		target_acc_w.setX(target_acc_w.x() + friction_scale * friction_acc * ax / a_norm);
-    // 		target_acc_w.setY(target_acc_w.y() + friction_scale * friction_acc * ay / a_norm);
-    // 	      }
-    // 	  }
-    // 	else
-    // 	  {
-    // 	    // 動いているとき
-    // 	    // PIDが明らかに減速方向を向いているときは速度方向補償を入れると止まりにくくなるので入れない
-    // 	    const double dot_acc_vel = ax * vx + ay * vy;
-	    
-    // 	    if (dot_acc_vel >= 0.0)
-    // 	      {
-    // 		target_acc_w.setX(target_acc_w.x() + friction_acc * vx / v_norm);
-    // 		target_acc_w.setY(target_acc_w.y() + friction_acc * vy / v_norm);
-    // 	      }
-    // 	  }
-    //   }
-    // target_acc_w.setX(std::clamp(target_acc_w.x(),-acc_limit,acc_limit));
-    // target_acc_w.setY(std::clamp(target_acc_w.y(),-acc_limit,acc_limit));
-    // if (a_norm>acc_limit){
-    //   double g = std::clamp(target_acc_w.x(),-acc_limit,acc_limit);
-    //   target_acc_w.setX();  
-    // }
-    // ROS_INFO_STREAM_THROTTLE(0.5,
-    // 			     "target_acc_w after friction: "
-    // 			     << "x=" << target_acc_w.x()
-    // 			     << ", y=" << target_acc_w.y()
-    // 			     << ", z=" << target_acc_w.z()
-    // 			     << ", vel=(" << vx << ", " << vy << ")"
-    // 			     << ", friction_acc=" << friction_acc
-    // 			     << ", normal_acc=" << normal_acc);
-  }
+  /*if(navigator_->getNaviState() == aerial_robot_navigation::HOVER_STATE ){
+    }*/
     
   tf::Vector3 target_acc_dash = (tf::Matrix3x3(tf::createQuaternionFromYaw(rpy_.z()))).inverse() * target_acc_w;
   tf::Vector3 target_acc_cog = uav_rot.inverse() * target_acc_w;
@@ -273,7 +181,7 @@ void GimbalrotorController::controlCore()
       gimbalrotor_robot_model_->getRotorsOriginFromCog<Eigen::Vector3d>();
   const auto& rotor_direction = gimbalrotor_robot_model_->getRotorDirection();
   const double m_f_rate = gimbalrotor_robot_model_->getMFRate();
-
+  
   Eigen::MatrixXd wrench_map = Eigen::MatrixXd::Zero(6, 3);
   wrench_map.block(0, 0, 3, 3) = Eigen::MatrixXd::Identity(3, 3);
   int last_col = 0;
@@ -286,7 +194,7 @@ void GimbalrotorController::controlCore()
     full_q_mat.middleCols(last_col, 3) = wrench_map;
     last_col += 3;
   }
-
+  Eigen::MatrixXd full_wrench_map=full_q_mat;//add
   full_q_mat.topRows(3) = mass_inv * full_q_mat.topRows(3);
   full_q_mat.bottomRows(3) = inertia_inv * full_q_mat.bottomRows(3);
 
@@ -319,6 +227,7 @@ void GimbalrotorController::controlCore()
   {
     integrated_rot.block(3 * i, rotor_coef_ * i, 3, rotor_coef_) = masked_rot[i];
   }
+  Eigen::MatrixXd integrated_wrench_map = full_wrench_map * integrated_rot;//add Q'
   integrated_map = full_q_mat * integrated_rot;
 
   /* extract controlled axis  */
@@ -338,7 +247,335 @@ void GimbalrotorController::controlCore()
     target_vectoring_f_trans_ = integrated_map_inv_trans_ * target_wrench_acc_cog.topRows(3);
   target_vectoring_f_rot_ = integrated_map_inv_rot_ * target_wrench_acc_cog.bottomRows(3);  // debug
   last_col = 0;
+  //QP
+  const bool ground_qp_active =use_ground_qp_ &&!underactuate_;
+  if (ground_qp_active)
+  {
+    const int n_var =rotor_coef_ * motor_num_;
+    const int n_eq = 6;//等式制約
+    const int n_in = 1;//不等式制約
+    /*nominal allocation
+    Eigen::VectorXd lambda_nom =target_vectoring_f_trans_+target_vectoring_f_rot_;
+     * Q_F, Q_tau
+     *
+     * W = [F ; tau] = Qbar lambda */
+    Eigen::MatrixXd Q_F =
+        integrated_wrench_map.topRows(3);
 
+    Eigen::MatrixXd Q_tau =
+        integrated_wrench_map.bottomRows(3);
+
+    /*
+     * friction direction
+     * Q_F is COG frame, therefore d_hat also COG frame
+    */
+
+    tf::Vector3 vel_w =estimator_->getVel(Frame::COG,estimate_mode_);
+    tf::Vector3 vel_cog =uav_rot.inverse() *vel_w;
+
+    Eigen::Vector2d vel_xy(vel_cog.x(),vel_cog.y());
+    Eigen::Vector2d acc_xy_cmd(target_acc_cog.x(),target_acc_cog.y());
+
+    const double vel_norm =vel_xy.norm();
+    const double acc_norm =acc_xy_cmd.norm();
+
+    Eigen::Vector2d d_hat = Eigen::Vector2d::Zero();
+    double mu = 0.0;
+
+    // 静止摩擦16角形 
+    const int friction_edges = 16;
+    const int n_in_static = friction_edges + 3;
+
+    const double mass = gimbalrotor_robot_model_->getMass();
+
+    const double gravity = aerial_robot_estimation::G;
+    const double mg = mass * gravity;
+    
+    const double N_min = ground_normal_force_rate_ * mg;
+
+    std::array<Eigen::Vector3d, 8> contact_pos = {
+    //4隅（COG基準）
+    Eigen::Vector3d( 0.238388,  0.259399, 0.0),
+    Eigen::Vector3d(-0.281612,  0.259399, 0.0),
+    Eigen::Vector3d(-0.281612, -0.260601, 0.0),
+    Eigen::Vector3d( 0.238388, -0.260601, 0.0),
+
+    // rotor_arm直下4点（COG基準）
+    Eigen::Vector3d( 0.098798,  0.119809, 0.0),
+    Eigen::Vector3d(-0.142902,  0.120899, 0.0),
+    Eigen::Vector3d(-0.142902, -0.122101, 0.0),
+    Eigen::Vector3d( 0.099678, -0.122101, 0.0)
+    };
+
+    Eigen::Vector3d vel_cog_eigen(vel_cog.x(),vel_cog.y(),vel_cog.z());
+    Eigen::Vector3d s = Eigen::Vector3d::Zero();
+    Eigen::Vector3d h = Eigen::Vector3d::Zero();
+
+    const int contact_num = 8;
+
+    for (int i = 0; i < contact_num; ++i)
+      {
+	const Eigen::Vector3d& r_i = contact_pos[i];
+	// 接地点速度
+	Eigen::Vector3d v_i =vel_cog_eigen + omega.cross(r_i);
+	Eigen::Vector2d v_i_xy(v_i.x(), v_i.y());
+	Eigen::Vector3d d_i = Eigen::Vector3d::Zero();
+
+	if (v_i_xy.norm() > 1.0e-4)
+	  {
+	    d_i.x() = v_i_xy.x() / v_i_xy.norm();
+	    d_i.y() = v_i_xy.y() / v_i_xy.norm();
+	  }
+
+	// 1/8 Σ d_i
+	s += d_i / static_cast<double>(contact_num);
+	
+	// 1/8 Σ (r_i × d_i)
+	h += r_i.cross(d_i) / static_cast<double>(contact_num);
+      }
+
+    double r_eff = 0.0;
+    for (int i = 0; i < contact_num; ++i)
+      {
+	const double rho_i =
+        std::sqrt(contact_pos[i].x() * contact_pos[i].x() + contact_pos[i].y() * contact_pos[i].y());
+	r_eff += rho_i / static_cast<double>(contact_num);
+      }
+ 
+    //desired torque
+    Eigen::Vector3d alpha_cmd(target_ang_acc_x,target_ang_acc_y,target_ang_acc_z);
+    Eigen::Vector3d tau_cmd =inertia * alpha_cmd + gyro;
+
+    //STATIC FRICTION QP
+    Eigen::MatrixXd Aeq_static = Eigen::MatrixXd::Zero(n_eq, n_var);
+    Eigen::VectorXd beq_static = Eigen::VectorXd::Zero(n_eq);
+
+    Aeq_static.topRows(2) = Q_F.topRows(2);
+    beq_static.head(2) = mass * acc_xy_cmd;
+    
+    //roll, pitch, yaw
+    Aeq_static.bottomRows(3) = Q_tau;
+    beq_static.tail(3) = tau_cmd;
+    //16角形で近似
+    Eigen::MatrixXd C_static = Eigen::MatrixXd::Zero(n_in_static, n_var);
+    Eigen::VectorXd l_static = Eigen::VectorXd::Constant(n_in_static, -1.0e20);
+    Eigen::VectorXd u_static = Eigen::VectorXd::Zero(n_in_static);
+
+    //cos(theta) fx + sin(theta) fy<= mu N cos(pi/16)
+    const double polygon_scale = std::cos(M_PI / friction_edges);
+    for (int j = 0; j < friction_edges; ++j)
+      {
+	const double theta =
+	  2.0 * M_PI * j / friction_edges;
+	const double nx = std::cos(theta);
+	const double ny = std::sin(theta);
+	C_static.row(j) =-nx * Q_F.row(0)-ny * Q_F.row(1)+ ground_mu_static_* polygon_scale* Q_F.row(2);
+	u_static(j) =ground_mu_static_* polygon_scale * mg;
+      }
+    C_static.row(friction_edges) =Q_F.row(2);
+    l_static(friction_edges) = 0.0;
+    u_static(friction_edges) = mg - N_min;
+
+    const int yaw_pos_idx = friction_edges + 1;
+    const int yaw_neg_idx = friction_edges + 2;
+
+    C_static.row(yaw_pos_idx) =Q_tau.row(2) + ground_mu_static_ * r_eff * Q_F.row(2);
+
+    u_static(yaw_pos_idx) =ground_mu_static_ * r_eff * mg;
+    
+    C_static.row(yaw_neg_idx) =-Q_tau.row(2)+ ground_mu_static_ * r_eff * Q_F.row(2);
+
+    u_static(yaw_neg_idx) = ground_mu_static_ * r_eff * mg;
+
+    Eigen::MatrixXd H_static = Eigen::MatrixXd::Identity(n_var, n_var);
+    Eigen::VectorXd g_static = Eigen::VectorXd::Zero(n_var);//-lambda_nom;
+    //solve
+    using namespace proxsuite::proxqp;
+
+    dense::QP<double> qp_static(n_var,n_eq,n_in_static);
+
+    qp_static.settings.verbose = false;
+    qp_static.settings.eps_abs = 1.0e-6;
+    qp_static.settings.eps_rel = 1.0e-6;
+
+    qp_static.init(H_static,g_static,Aeq_static,beq_static,C_static,l_static,u_static);
+    qp_static.solve();
+    
+    if (false/*vel_norm < ground_vel_eps_ && qp_static.results.info.status == QPSolverOutput::PROXQP_SOLVED*/)
+      {
+	Eigen::VectorXd lambda_static = qp_static.results.x;
+
+	target_vectoring_f_trans_ = lambda_static;
+	target_vectoring_f_rot_ = Eigen::VectorXd::Zero(n_var);
+	/* debug */
+	Eigen::Vector3d force_actual = Q_F * lambda_static;
+	Eigen::Vector2d friction_static =-force_actual.head<2>();
+
+	double Fz = force_actual.z();
+	double N  = mg - Fz;
+	ROS_INFO_STREAM_THROTTLE(
+				 0.1,
+				 "STICK"
+				 << " F = " << force_actual.transpose()
+				 << " fs = " << friction_static.transpose()
+				 << " |fs| = " << friction_static.norm()
+				 << " muN = " << ground_mu_static_ * N
+				 << " N = " << N);
+	Eigen::Vector3d tau_actual = Q_tau * lambda_static;
+	ROS_INFO_STREAM_THROTTLE(
+				 0.1,
+				 "yaw alpha_cmd=" << target_ang_acc_z
+				 << " tau_z_cmd=" << tau_cmd.z()
+				 << " tau_z_actual=" << tau_actual.z()
+				 << " omega_z=" << omega.z());
+      }
+    else
+      {
+	ROS_INFO_STREAM_THROTTLE(0.1,"Static friction limit exceeded -> SLIP");
+    /*if (vel_norm > ground_vel_eps_)
+    {
+      d_hat =vel_xy / vel_norm;
+      mu = ground_mu_kinetic_;
+    }
+    else if (acc_norm > ground_acc_eps_)
+    {
+      d_hat = acc_xy_cmd / acc_norm;
+
+      mu = ground_mu_static_;
+      }*/;
+    mu = ground_mu_kinetic_;
+    /* [ QFx + mu dx QFz ] lambda= m ax + mu m g dx
+       [ QFy + mu dy QFz ] lambda= m ay + mu m g dy */
+    Eigen::MatrixXd Aeq =Eigen::MatrixXd::Zero(n_eq,n_var);
+    Eigen::VectorXd beq =Eigen::VectorXd::Zero(n_eq);
+    Eigen::Vector2d s_xy(s.x(), s.y());
+    Aeq.topRows(2) =Q_F.topRows(2)+mu *s_xy *Q_F.row(2);
+    
+    beq.head(2) =gimbalrotor_robot_model_->getMass() *acc_xy_cmd + mu *gimbalrotor_robot_model_->getMass() *aerial_robot_estimation::G * s_xy;
+
+    /* yaw 
+     tau_rotor =I alpha + omega x I omega
+     地面のyaw摩擦トルクは0としている*/
+
+    Eigen::Vector3d alpha_cmd(target_ang_acc_x,target_ang_acc_y,target_ang_acc_z);
+    Eigen::Vector3d tau_cmd =inertia *alpha_cmd+gyro;
+    Eigen::Vector3d h_yaw = Eigen::Vector3d::Zero();
+
+    const double omega_yaw_eps = 0.03;   // [rad/s]
+    const double yaw_cmd__eps = 0.05;   // [rad/s]
+
+    double yaw_dir = 0.0;
+    const double yaw_rate_cmd =target_omega_.z();
+    if (std::abs(omega.z()) > omega_yaw_eps)
+      {
+	h_yaw.z() =h.z();
+      }
+    else if (std::abs(yaw_rate_cmd) > yaw_cmd__eps)
+      {
+	yaw_dir = (target_ang_acc_z > 0.0) ? 1.0 : -1.0;
+	h_yaw.z() = r_eff * yaw_dir;}
+    else{
+      h_yaw.z() =0.0;
+    }
+ 
+    Aeq.bottomRows(3) =Q_tau + mu * h_yaw * Q_F.row(2);;
+    beq.tail(3) =tau_cmd + mu * gimbalrotor_robot_model_->getMass() * aerial_robot_estimation::G * h_yaw;;
+
+    /* N = mg - Fz
+     N >= N_min
+     Fz <= mg - N_min */
+    Eigen::MatrixXd C =Eigen::MatrixXd::Zero(n_in,n_var);
+    Eigen::VectorXd l =Eigen::VectorXd::Zero(n_in);
+
+    Eigen::VectorXd u =Eigen::VectorXd::Zero(n_in);
+    C.row(0) =Q_F.row(2);
+    const double N_min =ground_normal_force_rate_*gimbalrotor_robot_model_->getMass()*aerial_robot_estimation::G;
+    l(0) = 0;
+    u(0) = gimbalrotor_robot_model_->getMass() * aerial_robot_estimation::G - N_min;
+    /*Objective
+     * 1/2 ||lambda-lambda_nom||^2
+     * 1/2 lambda^T lambda
+     * - lambda_nom^T lambda
+     * + constant
+     * H = I
+     * g = -lambda_nom
+     */
+
+    Eigen::MatrixXd H =Eigen::MatrixXd::Identity(n_var,n_var);
+    Eigen::VectorXd g =Eigen::VectorXd::Zero(n_var);//-lambda_nom;
+    //ProxQP solve
+    using namespace
+        proxsuite::proxqp;
+
+    dense::QP<double> qp(n_var,n_eq,n_in);
+    qp.settings.verbose = false;
+    qp.settings.eps_abs = 1.0e-6;
+    qp.settings.eps_rel = 1.0e-6;
+
+    qp.init(H,g,Aeq,beq,C,l,u);
+
+    qp.solve();
+
+    if (qp.results.info.status ==QPSolverOutput::PROXQP_SOLVED)
+    {
+      Eigen::VectorXd lambda_qp =qp.results.x;
+      
+      target_vectoring_f_trans_ =lambda_qp;
+
+      target_vectoring_f_rot_ =Eigen::VectorXd::Zero(n_var);
+
+      Eigen::Vector3d tau_actual = Q_tau * lambda_qp;
+      Eigen::Vector3d tau_error  = tau_actual - tau_cmd;
+
+      /* ROS_INFO_STREAM_THROTTLE(
+			     0.1,
+			     "tau_actual = " << tau_actual.transpose()
+			     << " tau_cmd = " << tau_cmd.transpose()
+			     << " tau_error = " << tau_error.transpose());*/
+      Eigen::Vector3d force_actual = Q_F * lambda_qp;
+
+      ROS_INFO_STREAM_THROTTLE(
+    0.1,
+    "Force = " << force_actual.transpose()
+    << "  Fz = " << force_actual.z());
+
+      double mass =gimbalrotor_robot_model_->getMass();
+
+      double Fz = force_actual.z();
+
+      double N =mass * aerial_robot_estimation::G - Fz;
+
+      ROS_INFO_STREAM_THROTTLE(
+    0.1,
+    "Fz = " << Fz
+    << " N = " << N);
+
+      ROS_INFO_STREAM_THROTTLE(
+    0.1,
+    "vel=" << vel_xy.transpose()
+    << " vel_norm=" << vel_norm
+    << " acc=" << acc_xy_cmd.transpose()
+    << " mu=" << mu
+    << " d_hat=" << d_hat.transpose());
+
+    ROS_INFO_STREAM_THROTTLE(
+			     0.1,
+			     "yaw alpha_cmd=" << target_ang_acc_z
+			     << " tau_z_cmd=" << tau_cmd.z()
+			     << " tau_z_actual=" << tau_actual.z()
+			     << " omega_z=" << omega.z());
+    ROS_INFO_STREAM(
+    "s = " << s.transpose()
+    << " h = " << h.transpose()
+    << " muNh_z = " << mu * N * h.z());
+    }
+    else
+    {
+      ROS_WARN_THROTTLE(1.0,"Ground ProxQP failed; ""use nominal pseudoinverse allocation");
+    }
+  }
+  }
+  
   /* under actuated axis  */
   if (underactuate_)
   {
@@ -380,7 +617,15 @@ void GimbalrotorController::controlCore()
 
     last_col += rotor_coef_;
   }
-  candidate_yaw_term_ = pid_controllers_.at(YAW).result() * max_yaw_scale;
+  //yaw加算阻止
+  if (ground_qp_active)
+  {
+    candidate_yaw_term_ = 0.0;
+  }
+  else
+  {
+    candidate_yaw_term_ =pid_controllers_.at(YAW).result()*max_yaw_scale;
+  }
 
   /* calculate target full thrusts and gimbal angles (considering full components)*/
   last_col = 0;
