@@ -248,21 +248,36 @@ void GimbalrotorController::controlCore()
   target_vectoring_f_rot_ = integrated_map_inv_rot_ * target_wrench_acc_cog.bottomRows(3);  // debug
   last_col = 0;
   //QP
+  bool ground_qp_solved =false;
   const bool ground_qp_active =use_ground_qp_ &&!underactuate_;
   if (ground_qp_active)
-  {
-    const int n_var =rotor_coef_ * motor_num_;
-    const int n_eq = 6;//等式制約
-    const int n_in = 1;//不等式制約
-    /*nominal allocation
-    Eigen::VectorXd lambda_nom =target_vectoring_f_trans_+target_vectoring_f_rot_;
-     * Q_F, Q_tau
+    {
+      using namespace proxsuite::proxqp;
+      const int n_lambda =rotor_coef_ * motor_num_;
+      const int contact_num =8;
+      const int contact_dim =3;//fx fy N
+      const int n_var=n_lambda+contact_dim*contact_num;
+      const int n_normal_eq=contact_num-1;
+      const int n_eq = 6;//+n_normal_eq;等式制約
+
+      // 16角形 
+      const int friction_edges = 16;
+
+      const double mass = gimbalrotor_robot_model_->getMass();
+      const double gravity = aerial_robot_estimation::G;
+      const double mg = mass * gravity;
+      const double N_min = ground_normal_force_rate_ * mg;
+      const int gimbal_limit_num=2*motor_num_;
+      const int n_in = friction_edges*contact_num+contact_num+1+gimbal_limit_num;//不等式制約 16 Ni 
+      //nominal allocation
+      Eigen::VectorXd lambda_nom =target_vectoring_f_trans_+target_vectoring_f_rot_;
+   /* Q_F, Q_tau
      *
      * W = [F ; tau] = Qbar lambda */
-    Eigen::MatrixXd Q_F =
+      Eigen::MatrixXd Q_F =
         integrated_wrench_map.topRows(3);
 
-    Eigen::MatrixXd Q_tau =
+      Eigen::MatrixXd Q_tau =
         integrated_wrench_map.bottomRows(3);
 
     /*
@@ -270,311 +285,300 @@ void GimbalrotorController::controlCore()
      * Q_F is COG frame, therefore d_hat also COG frame
     */
 
-    tf::Vector3 vel_w =estimator_->getVel(Frame::COG,estimate_mode_);
-    tf::Vector3 vel_cog =uav_rot.inverse() *vel_w;
+      tf::Vector3 vel_w =estimator_->getVel(Frame::COG,estimate_mode_);
+      tf::Vector3 vel_cog =uav_rot.inverse() *vel_w;
 
-    Eigen::Vector2d vel_xy(vel_cog.x(),vel_cog.y());
-    Eigen::Vector2d acc_xy_cmd(target_acc_cog.x(),target_acc_cog.y());
+      Eigen::Vector2d vel_xy(vel_cog.x(),vel_cog.y());
+      Eigen::Vector2d acc_xy_cmd(target_acc_cog.x(),target_acc_cog.y());
 
-    const double vel_norm =vel_xy.norm();
-    const double acc_norm =acc_xy_cmd.norm();
+      const double vel_norm =vel_xy.norm();
+      const double acc_norm =acc_xy_cmd.norm();
 
-    Eigen::Vector2d d_hat = Eigen::Vector2d::Zero();
-    double mu = 0.0;
+      Eigen::Vector2d d_hat = Eigen::Vector2d::Zero();
+      double mu = 0.0;
 
-    // 静止摩擦16角形 
-    const int friction_edges = 16;
-    const int n_in_static = friction_edges + 3;
-
-    const double mass = gimbalrotor_robot_model_->getMass();
-
-    const double gravity = aerial_robot_estimation::G;
-    const double mg = mass * gravity;
-    
-    const double N_min = ground_normal_force_rate_ * mg;
-
-    std::array<Eigen::Vector3d, 8> contact_pos = {
-    //4隅（COG基準）
-    Eigen::Vector3d( 0.238388,  0.259399, 0.0),
-    Eigen::Vector3d(-0.281612,  0.259399, 0.0),
-    Eigen::Vector3d(-0.281612, -0.260601, 0.0),
-    Eigen::Vector3d( 0.238388, -0.260601, 0.0),
-
-    // rotor_arm直下4点（COG基準）
-    Eigen::Vector3d( 0.098798,  0.119809, 0.0),
-    Eigen::Vector3d(-0.142902,  0.120899, 0.0),
-    Eigen::Vector3d(-0.142902, -0.122101, 0.0),
-    Eigen::Vector3d( 0.099678, -0.122101, 0.0)
-    };
-
-    Eigen::Vector3d vel_cog_eigen(vel_cog.x(),vel_cog.y(),vel_cog.z());
-    Eigen::Vector3d s = Eigen::Vector3d::Zero();
-    Eigen::Vector3d h = Eigen::Vector3d::Zero();
-
-    const int contact_num = 8;
-
-    for (int i = 0; i < contact_num; ++i)
-      {
-	const Eigen::Vector3d& r_i = contact_pos[i];
-	// 接地点速度
-	Eigen::Vector3d v_i =vel_cog_eigen + omega.cross(r_i);
-	Eigen::Vector2d v_i_xy(v_i.x(), v_i.y());
-	Eigen::Vector3d d_i = Eigen::Vector3d::Zero();
-
-	if (v_i_xy.norm() > 1.0e-4)
-	  {
-	    d_i.x() = v_i_xy.x() / v_i_xy.norm();
-	    d_i.y() = v_i_xy.y() / v_i_xy.norm();
-	  }
-
-	// 1/8 Σ d_i
-	s += d_i / static_cast<double>(contact_num);
-	
-	// 1/8 Σ (r_i × d_i)
-	h += r_i.cross(d_i) / static_cast<double>(contact_num);
-      }
-
-    double r_eff = 0.0;
-    for (int i = 0; i < contact_num; ++i)
-      {
-	const double rho_i =
-        std::sqrt(contact_pos[i].x() * contact_pos[i].x() + contact_pos[i].y() * contact_pos[i].y());
-	r_eff += rho_i / static_cast<double>(contact_num);
-      }
- 
-    //desired torque
-    Eigen::Vector3d alpha_cmd(target_ang_acc_x,target_ang_acc_y,target_ang_acc_z);
-    Eigen::Vector3d tau_cmd =inertia * alpha_cmd + gyro;
-
-    //STATIC FRICTION QP
-    Eigen::MatrixXd Aeq_static = Eigen::MatrixXd::Zero(n_eq, n_var);
-    Eigen::VectorXd beq_static = Eigen::VectorXd::Zero(n_eq);
-
-    Aeq_static.topRows(2) = Q_F.topRows(2);
-    beq_static.head(2) = mass * acc_xy_cmd;
-    
-    //roll, pitch, yaw
-    Aeq_static.bottomRows(3) = Q_tau;
-    beq_static.tail(3) = tau_cmd;
-    //16角形で近似
-    Eigen::MatrixXd C_static = Eigen::MatrixXd::Zero(n_in_static, n_var);
-    Eigen::VectorXd l_static = Eigen::VectorXd::Constant(n_in_static, -1.0e20);
-    Eigen::VectorXd u_static = Eigen::VectorXd::Zero(n_in_static);
-
-    //cos(theta) fx + sin(theta) fy<= mu N cos(pi/16)
-    const double polygon_scale = std::cos(M_PI / friction_edges);
-    for (int j = 0; j < friction_edges; ++j)
-      {
-	const double theta =
-	  2.0 * M_PI * j / friction_edges;
-	const double nx = std::cos(theta);
-	const double ny = std::sin(theta);
-	C_static.row(j) =-nx * Q_F.row(0)-ny * Q_F.row(1)+ ground_mu_static_* polygon_scale* Q_F.row(2);
-	u_static(j) =ground_mu_static_* polygon_scale * mg;
-      }
-    C_static.row(friction_edges) =Q_F.row(2);
-    l_static(friction_edges) = 0.0;
-    u_static(friction_edges) = mg - N_min;
-
-    const int yaw_pos_idx = friction_edges + 1;
-    const int yaw_neg_idx = friction_edges + 2;
-
-    C_static.row(yaw_pos_idx) =Q_tau.row(2) + ground_mu_static_ * r_eff * Q_F.row(2);
-
-    u_static(yaw_pos_idx) =ground_mu_static_ * r_eff * mg;
-    
-    C_static.row(yaw_neg_idx) =-Q_tau.row(2)+ ground_mu_static_ * r_eff * Q_F.row(2);
-
-    u_static(yaw_neg_idx) = ground_mu_static_ * r_eff * mg;
-
-    Eigen::MatrixXd H_static = Eigen::MatrixXd::Identity(n_var, n_var);
-    Eigen::VectorXd g_static = Eigen::VectorXd::Zero(n_var);//-lambda_nom;
-    //solve
-    using namespace proxsuite::proxqp;
-
-    dense::QP<double> qp_static(n_var,n_eq,n_in_static);
-
-    qp_static.settings.verbose = false;
-    qp_static.settings.eps_abs = 1.0e-6;
-    qp_static.settings.eps_rel = 1.0e-6;
-
-    qp_static.init(H_static,g_static,Aeq_static,beq_static,C_static,l_static,u_static);
-    qp_static.solve();
-    
-    if (false/*vel_norm < ground_vel_eps_ && qp_static.results.info.status == QPSolverOutput::PROXQP_SOLVED*/)
-      {
-	Eigen::VectorXd lambda_static = qp_static.results.x;
-
-	target_vectoring_f_trans_ = lambda_static;
-	target_vectoring_f_rot_ = Eigen::VectorXd::Zero(n_var);
-	/* debug */
-	Eigen::Vector3d force_actual = Q_F * lambda_static;
-	Eigen::Vector2d friction_static =-force_actual.head<2>();
-
-	double Fz = force_actual.z();
-	double N  = mg - Fz;
-	ROS_INFO_STREAM_THROTTLE(
-				 0.1,
-				 "STICK"
-				 << " F = " << force_actual.transpose()
-				 << " fs = " << friction_static.transpose()
-				 << " |fs| = " << friction_static.norm()
-				 << " muN = " << ground_mu_static_ * N
-				 << " N = " << N);
-	Eigen::Vector3d tau_actual = Q_tau * lambda_static;
-	ROS_INFO_STREAM_THROTTLE(
-				 0.1,
-				 "yaw alpha_cmd=" << target_ang_acc_z
-				 << " tau_z_cmd=" << tau_cmd.z()
-				 << " tau_z_actual=" << tau_actual.z()
-				 << " omega_z=" << omega.z());
-      }
-    else
-      {
-	ROS_INFO_STREAM_THROTTLE(0.1,"Static friction limit exceeded -> SLIP");
-    /*if (vel_norm > ground_vel_eps_)
-    {
-      d_hat =vel_xy / vel_norm;
-      mu = ground_mu_kinetic_;
-    }
-    else if (acc_norm > ground_acc_eps_)
-    {
-      d_hat = acc_xy_cmd / acc_norm;
-
-      mu = ground_mu_static_;
-      }*/;
-    mu = ground_mu_kinetic_;
-    /* [ QFx + mu dx QFz ] lambda= m ax + mu m g dx
-       [ QFy + mu dy QFz ] lambda= m ay + mu m g dy */
-    Eigen::MatrixXd Aeq =Eigen::MatrixXd::Zero(n_eq,n_var);
-    Eigen::VectorXd beq =Eigen::VectorXd::Zero(n_eq);
-    Eigen::Vector2d s_xy(s.x(), s.y());
-    Aeq.topRows(2) =Q_F.topRows(2)+mu *s_xy *Q_F.row(2);
-    
-    beq.head(2) =gimbalrotor_robot_model_->getMass() *acc_xy_cmd + mu *gimbalrotor_robot_model_->getMass() *aerial_robot_estimation::G * s_xy;
-
-    /* yaw 
-     tau_rotor =I alpha + omega x I omega
-     地面のyaw摩擦トルクは0としている*/
-
-    Eigen::Vector3d alpha_cmd(target_ang_acc_x,target_ang_acc_y,target_ang_acc_z);
-    Eigen::Vector3d tau_cmd =inertia *alpha_cmd+gyro;
-    Eigen::Vector3d h_yaw = Eigen::Vector3d::Zero();
-
-    const double omega_yaw_eps = 0.03;   // [rad/s]
-    const double yaw_cmd__eps = 0.05;   // [rad/s]
-
-    double yaw_dir = 0.0;
-    const double yaw_rate_cmd =target_omega_.z();
-    if (std::abs(omega.z()) > omega_yaw_eps)
-      {
-	h_yaw.z() =h.z();
-      }
-    else if (std::abs(yaw_rate_cmd) > yaw_cmd__eps)
-      {
-	yaw_dir = (target_ang_acc_z > 0.0) ? 1.0 : -1.0;
-	h_yaw.z() = r_eff * yaw_dir;}
-    else{
-      h_yaw.z() =0.0;
-    }
- 
-    Aeq.bottomRows(3) =Q_tau + mu * h_yaw * Q_F.row(2);;
-    beq.tail(3) =tau_cmd + mu * gimbalrotor_robot_model_->getMass() * aerial_robot_estimation::G * h_yaw;;
-
-    /* N = mg - Fz
-     N >= N_min
-     Fz <= mg - N_min */
-    Eigen::MatrixXd C =Eigen::MatrixXd::Zero(n_in,n_var);
-    Eigen::VectorXd l =Eigen::VectorXd::Zero(n_in);
-
-    Eigen::VectorXd u =Eigen::VectorXd::Zero(n_in);
-    C.row(0) =Q_F.row(2);
-    const double N_min =ground_normal_force_rate_*gimbalrotor_robot_model_->getMass()*aerial_robot_estimation::G;
-    l(0) = 0;
-    u(0) = gimbalrotor_robot_model_->getMass() * aerial_robot_estimation::G - N_min;
-    /*Objective
-     * 1/2 ||lambda-lambda_nom||^2
-     * 1/2 lambda^T lambda
-     * - lambda_nom^T lambda
-     * + constant
-     * H = I
-     * g = -lambda_nom
-     */
-
-    Eigen::MatrixXd H =Eigen::MatrixXd::Identity(n_var,n_var);
-    Eigen::VectorXd g =Eigen::VectorXd::Zero(n_var);//-lambda_nom;
-    //ProxQP solve
-    using namespace
-        proxsuite::proxqp;
-
-    dense::QP<double> qp(n_var,n_eq,n_in);
-    qp.settings.verbose = false;
-    qp.settings.eps_abs = 1.0e-6;
-    qp.settings.eps_rel = 1.0e-6;
-
-    qp.init(H,g,Aeq,beq,C,l,u);
-
-    qp.solve();
-
-    if (qp.results.info.status ==QPSolverOutput::PROXQP_SOLVED)
-    {
-      Eigen::VectorXd lambda_qp =qp.results.x;
       
-      target_vectoring_f_trans_ =lambda_qp;
 
-      target_vectoring_f_rot_ =Eigen::VectorXd::Zero(n_var);
+      std::array<Eigen::Vector3d, 8> contact_pos = {
+	// base_link collision 4隅（COG基準）
+	Eigen::Vector3d( 0.238911,  0.259445, -0.145619),
+	Eigen::Vector3d(-0.281089,  0.259445, -0.145619),
+	Eigen::Vector3d(-0.281089, -0.260555, -0.145619),
+	Eigen::Vector3d( 0.238911, -0.260555, -0.145619),
+	// rotor_arm直下4点（COG基準）
+	Eigen::Vector3d( 0.099321,  0.119855, -0.145619),
+	Eigen::Vector3d(-0.142379,  0.120945, -0.145619),
+	Eigen::Vector3d(-0.142379, -0.122055, -0.145619),
+	Eigen::Vector3d( 0.100201, -0.122055, -0.145619)
+      };
 
-      Eigen::Vector3d tau_actual = Q_tau * lambda_qp;
-      Eigen::Vector3d tau_error  = tau_actual - tau_cmd;
+      Eigen::Vector3d vel_cog_eigen(vel_cog.x(),vel_cog.y(),vel_cog.z());
+ 
+      //desired torque
+      Eigen::Vector3d alpha_cmd(target_ang_acc_x,target_ang_acc_y,target_ang_acc_z);
+      Eigen::Vector3d tau_cmd =inertia * alpha_cmd + gyro;
 
-      /* ROS_INFO_STREAM_THROTTLE(
-			     0.1,
-			     "tau_actual = " << tau_actual.transpose()
-			     << " tau_cmd = " << tau_cmd.transpose()
-			     << " tau_error = " << tau_error.transpose());*/
-      Eigen::Vector3d force_actual = Q_F * lambda_qp;
+      //FRICTION QP
+      Eigen::MatrixXd Aeq = Eigen::MatrixXd::Zero(n_eq, n_var);
+      Eigen::VectorXd beq = Eigen::VectorXd::Zero(n_eq);
 
-      ROS_INFO_STREAM_THROTTLE(
-    0.1,
-    "Force = " << force_actual.transpose()
-    << "  Fz = " << force_actual.z());
+      // Rotor contribution
+      Aeq.block(0, 0,
+		3, n_lambda) = Q_F;
+      Aeq.block(3, 0,
+		3, n_lambda) = Q_tau;
 
-      double mass =gimbalrotor_robot_model_->getMass();
+      /* store for debug */
+      std::vector<Eigen::Matrix3d> B_contact(contact_num);
+      std::vector<Eigen::Vector2d> d_contact(contact_num);
+      for (int i = 0; i < contact_num; ++i)
+	{
+	  const Eigen::Vector3d& r_i =contact_pos[i];
+	  Eigen::Vector3d v_i =vel_cog_eigen + omega.cross(r_i);
+	  Eigen::Vector2d v_i_xy(v_i.x(),v_i.y());
 
-      double Fz = force_actual.z();
+	  Eigen::Vector2d d_i =Eigen::Vector2d::Zero();
+	  const double speed_i =v_i_xy.norm();
 
-      double N =mass * aerial_robot_estimation::G - Fz;
+	  if (speed_i > 1.0e-6)
+	    {//smoothStep
+	      double scale = 1.0; 
+	      if (ground_vel_eps_ > 1.0e-6)
+		{
+		  scale =smoothStep(speed_i / ground_vel_eps_);
+		}
 
-      ROS_INFO_STREAM_THROTTLE(
-    0.1,
-    "Fz = " << Fz
-    << " N = " << N);
+	      d_i = scale * v_i_xy / speed_i;
+	    }
+	  d_contact[i] = d_i;
 
-      ROS_INFO_STREAM_THROTTLE(
-    0.1,
-    "vel=" << vel_xy.transpose()
-    << " vel_norm=" << vel_norm
-    << " acc=" << acc_xy_cmd.transpose()
-    << " mu=" << mu
-    << " d_hat=" << d_hat.transpose());
+	  /*
+	   * ci = [fx_i, fy_i, N_i]
+	   * F_ground_i =
+	   * [ fx_i - Crr Ni dxi ]
+	   * [ fy_i - Crr Ni dyi ]
+	   * [ Ni                ]
+	   * = Bi ci
+	   */
+	  Eigen::Matrix3d B_i =Eigen::Matrix3d::Identity();
 
-    ROS_INFO_STREAM_THROTTLE(
-			     0.1,
-			     "yaw alpha_cmd=" << target_ang_acc_z
-			     << " tau_z_cmd=" << tau_cmd.z()
-			     << " tau_z_actual=" << tau_actual.z()
-			     << " omega_z=" << omega.z());
-    ROS_INFO_STREAM(
-    "s = " << s.transpose()
-    << " h = " << h.transpose()
-    << " muNh_z = " << mu * N * h.z());
-    }
+	  B_i(0, 2) =-ground_rolling_resistance_ * d_i.x();
+
+	  B_i(1, 2) =-ground_rolling_resistance_ * d_i.y();
+
+	  B_contact[i] = B_i;
+
+	  const int idx =n_lambda + contact_dim * i;
+
+	  /* Force equation*/
+	  Aeq.block(0, idx,
+		    3, 3) = B_i;
+
+	  /* Torque equation
+	   tau_i = ri x Fground_i*/
+	  Aeq.block(3, idx,
+		    3, 3) =
+	    aerial_robot_model::skew(r_i)* B_i;
+	}
+      //beq
+      beq.head(2) = mass * acc_xy_cmd;
+      beq(2)=mg;
+      //roll, pitch, yaw
+      beq.segment<3>(3) = tau_cmd;
+
+      /* N0 = N1 = ... = N7
+      int eq_row = 6;
+      const int N0_idx = n_lambda + 2;
+      for (int i = 1; i < contact_num; ++i)
+	{
+	  const int Ni_idx = n_lambda + contact_dim * i + 2;
+	  // Ni - N0 = 0
+	  Aeq(eq_row, Ni_idx) = 1.0;
+	  Aeq(eq_row, N0_idx) = -1.0;
+	  beq(eq_row) = 0.0;
+	  ++eq_row;
+	  }*/
+      //16角形で近似
+      Eigen::MatrixXd C = Eigen::MatrixXd::Zero(n_in, n_var);
+      Eigen::VectorXd l = Eigen::VectorXd::Constant(n_in, -1.0e20);
+      Eigen::VectorXd u = Eigen::VectorXd::Constant(n_in,1.0e20);
+      int row=0;
+      const double friction_safety = 0.75;
+      //cos(theta) fx + sin(theta) fy<= mu N cos(pi/16)
+      const double polygon_scale = std::cos(M_PI / static_cast<double>(friction_edges));
+      for (int i=0;i<contact_num;++i){
+	const int idx=n_lambda+contact_dim*i;
+	const int fx_idx = idx;
+	const int fy_idx = idx + 1;
+	const int N_idx  = idx + 2;
+	for (int j = 0; j < friction_edges; ++j)
+	  {
+	    const double theta =2.0 * M_PI * static_cast<double>(j) / static_cast<double>(friction_edges);
+	    const double nx = std::cos(theta);
+	    const double ny = std::sin(theta);
+	    C(row,fx_idx)=nx;
+	    C(row,fy_idx)=ny;
+	    C(row,N_idx) =-friction_safety*ground_mu_static_* polygon_scale;
+	    u(row)=0.0;
+	    ++row;
+	  }
+	//Ni >= 0 
+	C(row, N_idx) = 1.0;
+	l(row) = 0.0;
+	u(row) = 1.0e20;
+	++row;
+      }
+      const double rotor_fz_min_rate = 0.4;
+      const double rotor_fz_min = rotor_fz_min_rate * mg;
+      C.block(row, 0,
+	      1, n_lambda) =Q_F.row(2);
+      //l(row) = 0.0;
+      l(row) = rotor_fz_min;
+      u(row) = mg - N_min;
+      ++row;
+
+      //gimbal_limit
+      const double gimbal_angle_max = 1.4;
+      const double c_gimbal = std::cos(gimbal_angle_max);
+      const double s_gimbal = std::sin(gimbal_angle_max);
+
+      for (int i = 0; i < motor_num_; ++i)
+	{
+	  const int idx = rotor_coef_ * i;
+	  const int lambda_x_idx = idx;
+	  const int lambda_z_idx = idx + 1;
+	  // +theta side:
+	  // cos(theta_max) * lambda_x
+	  // - sin(theta_max) * lambda_z <= 0
+	  C(row, lambda_x_idx) = c_gimbal;
+	  C(row, lambda_z_idx) = -s_gimbal;
+	  u(row) = 0.0;
+	  ++row;
+
+	  // -theta side:
+	  // -cos(theta_max) * lambda_x
+	  // - sin(theta_max) * lambda_z <= 0
+	  C(row, lambda_x_idx) = -c_gimbal;
+	  C(row, lambda_z_idx) = -s_gimbal;
+	  u(row) = 0.0;
+	  ++row;
+	}
+ 
+      Eigen::MatrixXd H =Eigen::MatrixXd::Zero(n_var, n_var);
+      Eigen::VectorXd g =Eigen::VectorXd::Zero(n_var);
+
+      /* Objective:
+       * 1/2 w_lambda ||lambda - lambda_nom||^2
+       * + 1/2 w_f sum_i (fx_i^2 + fy_i^2) */
+      const double w_lambda = 1.0;
+      const double w_f = 10.0;
+
+      /* lambda cost */
+      H.topLeftCorner(n_lambda, n_lambda) =w_lambda * Eigen::MatrixXd::Identity(n_lambda, n_lambda);
+
+      /* linear term for lambda_nom */
+      g.head(n_lambda) = -w_lambda * lambda_nom;
+
+      /* contact tangential force cost */
+      for (int i = 0; i < contact_num; ++i)
+	{
+	  const int idx = n_lambda + contact_dim * i;
+	  const int fx_idx = idx;
+	  const int fy_idx = idx + 1;
+
+	  H(fx_idx, fx_idx) = w_f;
+	  H(fy_idx, fy_idx) = w_f;
+	}
+
+      //H.topLeftCorner(n_lambda, n_lambda) = Eigen::MatrixXd::Identity(n_lambda, n_lambda);
+      //solve
+      dense::QP<double> qp(n_var,n_eq,n_in);
+      
+      qp.settings.verbose = false;
+      qp.settings.eps_abs = 1.0e-6;
+      qp.settings.eps_rel = 1.0e-6;
+
+      qp.init(H,g,Aeq,beq,C,l,u);
+      qp.solve();
+    
+    if (qp.results.info.status == QPSolverOutput::PROXQP_SOLVED)
+      {
+	ground_qp_solved = true;
+	Eigen::VectorXd x_qp = qp.results.x;
+	Eigen::VectorXd lambda_qp = x_qp.head(n_lambda);
+	target_vectoring_f_trans_ = lambda_qp;
+	target_vectoring_f_rot_ = Eigen::VectorXd::Zero(n_lambda);
+	/* debug */
+	Eigen::Vector3d rotor_force = Q_F * lambda_qp;
+	Eigen::Vector3d rotor_tau = Q_tau * lambda_qp;
+	Eigen::Vector3d ground_force = Eigen::Vector3d::Zero();
+	Eigen::Vector3d ground_tau = Eigen::Vector3d::Zero();
+	double N_total = 0.0;
+	double min_friction_margin =1.0e20;
+	for (int i = 0;i < contact_num;++i)
+	  {
+	    const int idx =n_lambda + contact_dim * i;
+	    Eigen::Vector3d ci = x_qp.segment<3>(idx);
+	    const double fx_i =ci.x();
+	    const double fy_i =ci.y();
+	    const double N_i =ci.z();
+	    Eigen::Vector2d f_i(fx_i,fy_i);
+	    Eigen::Vector3d F_ground_i =B_contact[i] * ci;
+	    ground_force +=F_ground_i;
+	    ground_tau +=contact_pos[i].cross(F_ground_i);
+	    N_total += N_i;
+	    const double margin =ground_mu_static_ * N_i- f_i.norm();
+	    min_friction_margin =std::min(min_friction_margin,margin);
+	  }
+	Eigen::Vector3d force_total =rotor_force+ ground_force;
+	Eigen::Vector3d tau_total =rotor_tau + ground_tau;
+	ROS_INFO_STREAM_THROTTLE(
+				 0.1,
+				 "GROUND QP"
+				 << " rotor_F="
+				 << rotor_force.transpose()
+				 << " ground_F="
+				 << ground_force.transpose()
+				 << " total_F="
+				 << force_total.transpose()
+				 << " N_total="
+				 << N_total
+				 << " min_margin="
+				 << min_friction_margin);
+	ROS_INFO_STREAM_THROTTLE(
+				 0.1,
+				 "tau_cmd="
+				 << tau_cmd.transpose()
+				 << " tau_rotor="
+				 << rotor_tau.transpose()
+				 << " tau_ground="
+				 << ground_tau.transpose()
+				 << " tau_total="
+				 << tau_total.transpose());
+	ROS_INFO_STREAM_THROTTLE(
+				 0.1,
+				 "lambda_err=" << (lambda_qp - lambda_nom).norm()
+				 << " lambda_nom=" << lambda_nom.transpose()
+				 << " lambda_qp=" << lambda_qp.transpose());
+	std::stringstream ss;
+	ss << "gimbal_deg=";
+	for (int i = 0; i < motor_num_; ++i)
+	  {
+	    const int idx = rotor_coef_ * i;
+	    const double theta =atan2(-lambda_qp(idx),lambda_qp(idx + 1));
+	    ss << theta * 180.0 / M_PI << " ";
+	  }
+	ROS_INFO_STREAM_THROTTLE(0.1, ss.str());
+	ROS_INFO_STREAM_THROTTLE(
+				     0.1,
+				     "acc_xy_cmd="
+				     << acc_xy_cmd.transpose());
+      }
     else
-    {
-      ROS_WARN_THROTTLE(1.0,"Ground ProxQP failed; ""use nominal pseudoinverse allocation");
+      {
+	ROS_INFO_STREAM_THROTTLE(0.1,"use normal");
+      }
     }
-  }
-  }
   
   /* under actuated axis  */
   if (underactuate_)
@@ -618,7 +622,7 @@ void GimbalrotorController::controlCore()
     last_col += rotor_coef_;
   }
   //yaw加算阻止
-  if (ground_qp_active)
+  if (ground_qp_solved)
   {
     candidate_yaw_term_ = 0.0;
   }

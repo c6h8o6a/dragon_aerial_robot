@@ -8,9 +8,11 @@ controller:
   use_ground_qp: true
   ground_mu_static: 0.5
   ground_mu_kinetic: 0.3
+  ground_rolling_resistance: 0.03
   ground_normal_force_rate: 0.1
   ground_vel_eps: 0.03
   ground_acc_eps: 0.3
+  
 
   xy:
     p_gain: 10
