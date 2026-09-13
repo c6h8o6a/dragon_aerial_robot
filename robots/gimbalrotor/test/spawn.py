@@ -30,7 +30,7 @@ while True:
         x,y,z=0,1,0.091+0.05529
         roll, pitch, yaw = 0.0, 0.0, -math.pi / 2
     elif name=="box":
-        x,y,z=0,1.2,0.0455
+        x,y,z=1,0,0
         roll, pitch, yaw = 0.0, 0.0, 0.0
     pose.position.x = x
     pose.position.y = y

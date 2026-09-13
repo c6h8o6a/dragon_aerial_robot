@@ -261,7 +261,7 @@ void GimbalrotorController::controlCore()
       const int n_eq = 6;//+n_normal_eq;等式制約
 
       // 16角形 
-      const int friction_edges = 16;
+      const int friction_edges = 8;
 
       const double mass = gimbalrotor_robot_model_->getMass();
       const double gravity = aerial_robot_estimation::G;
@@ -297,19 +297,18 @@ void GimbalrotorController::controlCore()
       Eigen::Vector2d d_hat = Eigen::Vector2d::Zero();
       double mu = 0.0;
 
-      
-
       std::array<Eigen::Vector3d, 8> contact_pos = {
-	// base_link collision 4隅（COG基準）
-	Eigen::Vector3d( 0.238911,  0.259445, -0.145619),
-	Eigen::Vector3d(-0.281089,  0.259445, -0.145619),
-	Eigen::Vector3d(-0.281089, -0.260555, -0.145619),
-	Eigen::Vector3d( 0.238911, -0.260555, -0.145619),
-	// rotor_arm直下4点（COG基準）
-	Eigen::Vector3d( 0.099321,  0.119855, -0.145619),
-	Eigen::Vector3d(-0.142379,  0.120945, -0.145619),
-	Eigen::Vector3d(-0.142379, -0.122055, -0.145619),
-	Eigen::Vector3d( 0.100201, -0.122055, -0.145619)
+	// 外側4点 COG基準
+	Eigen::Vector3d( 0.2180869,  0.2399500, -0.1531371),
+	Eigen::Vector3d(-0.2631011,  0.2399500, -0.1531371),
+	Eigen::Vector3d(-0.2631011, -0.2412380, -0.1531371),
+	Eigen::Vector3d( 0.2180869, -0.2412380, -0.1531371),
+
+	// 内側4点 COG基準
+	Eigen::Vector3d( 0.0865849,  0.1084480, -0.1531371),
+	Eigen::Vector3d(-0.1315991,  0.1084480, -0.1531371),
+	Eigen::Vector3d(-0.1315991, -0.1097360, -0.1531371),
+	Eigen::Vector3d( 0.0865849, -0.1097360, -0.1531371)
       };
 
       Eigen::Vector3d vel_cog_eigen(vel_cog.x(),vel_cog.y(),vel_cog.z());
@@ -428,7 +427,7 @@ void GimbalrotorController::controlCore()
 	u(row) = 1.0e20;
 	++row;
       }
-      const double rotor_fz_min_rate = 0.4;
+      const double rotor_fz_min_rate = 0.3;
       const double rotor_fz_min = rotor_fz_min_rate * mg;
       C.block(row, 0,
 	      1, n_lambda) =Q_F.row(2);
