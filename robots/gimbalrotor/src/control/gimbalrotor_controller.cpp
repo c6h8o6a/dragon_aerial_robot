@@ -600,7 +600,7 @@ void GimbalrotorController::controlCore()
   }
 
   /*  calculate target base thrust (considering only translational components)*/
-  double max_yaw_scale = 0;  // for reconstruct yaw control term in spinal
+  // double max_yaw_scale = 0;  // for reconstruct yaw control term in spinal
   for (int i = 0; i < motor_num_; i++)
   {
     Eigen::VectorXd f_i = target_vectoring_f_trans_.segment(last_col, rotor_coef_);
@@ -615,11 +615,16 @@ void GimbalrotorController::controlCore()
       target_base_thrust_.at(rotor_coef_ * i + 1) = f_i[1];
       target_base_thrust_.at(rotor_coef_ * i + 2) = f_i[2];
     }
-    if (integrated_map_inv(i, (underactuate_ ? YAW - 2 : YAW)) > max_yaw_scale)
-      max_yaw_scale = integrated_map_inv(i, (underactuate_ ? YAW - 2 : YAW));  // underactuated: yaw col is shifted
+    // if (integrated_map_inv(i, (underactuate_ ? YAW - 2 : YAW)) > max_yaw_scale)
+    //   max_yaw_scale = integrated_map_inv(i, (underactuate_ ? YAW - 2 : YAW));  // underactuated: yaw col is shifted
 
     last_col += rotor_coef_;
   }
+  /* yaw command scale */
+  const int yaw_col = underactuate_ ? YAW - 2 : YAW;
+
+  double max_yaw_scale =
+    integrated_map_inv.col(yaw_col).cwiseAbs().maxCoeff();
   //yaw加算阻止
   if (ground_qp_solved)
   {
@@ -629,6 +634,12 @@ void GimbalrotorController::controlCore()
   {
     candidate_yaw_term_ =pid_controllers_.at(YAW).result()*max_yaw_scale;
   }
+  ROS_WARN_THROTTLE(
+    0.5,
+    "yaw_pid=%f yaw_scale=%f yaw_cmd=%f",
+    pid_controllers_.at(YAW).result(),
+    max_yaw_scale,
+    candidate_yaw_term_);
 
   /* calculate target full thrusts and gimbal angles (considering full components)*/
   last_col = 0;
