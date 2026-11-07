@@ -1,0 +1,17 @@
+mass: 1.5
+
+inertia: [
+   0.04887861036, -0.00000002108,  0.00000000001,
+  -0.00000002108,  0.02916393389,  0.00000058673,
+   0.00000000001,  0.00000058673,  0.05737585629
+]
+
+cog_offset: [0.0, 0.0, 0.0]
+
+mocap_to_root_xyz: [0.0, 0.0, 0.0]
+mocap_to_root_rpy: [0.0, 0.0, 0.0]
+
+physical_parameters_verified: true
+
+max_pose_age_sec: 0.5
+warn_timeout_sec: 1.0

@@ -1,0 +1,63 @@
+<?xml version="1.0"?>
+<launch>
+  <!-- BEETLE 2 = passive Box (no flight controller, motors, servo bridge or estimator).
+       Unlike a powered beetle bringup, this launches ONLY the OptiTrack receiver
+       and the passive module's TF/model publisher. -->
+
+  <!-- Same naming convention as beetle/launch/bringup.launch. -->
+  <arg name="real_machine" default="true"/>
+  <arg name="simulation" default="false"/>
+  <arg name="robot_id" default="2"/>
+  <arg name="robot_ns" default="beetle$(arg robot_id)"/>
+
+  <!-- The ID in Motive is independent of the BEETLE module ID. -->
+  <arg name="mocap_rigid_body_id" default="$(arg robot_id)"/>
+  <arg name="mocap_topic" default="/$(arg robot_ns)/mocap/pose"/>
+  <arg name="world_frame" default="world"/>
+
+  <!-- Match these values with the working powered-BEETLE mocap config/Motive. -->
+  <arg name="multicast_address" default="239.255.42.99"/>
+  <arg name="command_port" default="1510"/>
+  <arg name="data_port" default="1511"/>
+
+  <!-- REQUIRED before running: fill in this YAML from measured/CAD Box data. -->
+  <arg name="box_model_config" default="$(find beetle)/config/BoxPassiveModel.yaml"/>
+
+  <group if="$(eval arg('real_machine') and not arg('simulation'))">
+    <param name="/use_sim_time" value="false" type="bool"/>
+
+    <!-- Analogous to sensors.launch.xml -> mocap.launch for a real BEETLE,
+         but only the single Box rigid body is enabled.
+         Use an absolute 'pose' topic so it is not accidentally resolved as
+         /beetle2/mocap_node/mocap/pose.  No 'tf' output is configured here:
+         the Python node alone owns beetle2/root and beetle2/cog TF. -->
+    <node pkg="mocap_optitrack" type="mocap_node" name="mocap_node"
+          ns="$(arg robot_ns)" output="screen" required="true">
+      <rosparam subst_value="true">
+        rigid_bodies:
+          '$(arg mocap_rigid_body_id)':
+            pose: $(arg mocap_topic)
+            parent_frame_id: $(arg world_frame)
+            child_frame_id: $(arg robot_ns)/mocap_rigid_body
+        optitrack_config:
+          enable_optitrack: true
+          multicast_address: $(arg multicast_address)
+          command_port: $(arg command_port)
+          data_port: $(arg data_port)
+      </rosparam>
+    </node>
+
+    <node pkg="beetle" type="box_tf_broadcaster_real.py"
+          name="box_tf_broadcaster_real" ns="$(arg robot_ns)"
+          output="screen" required="true">
+      <!-- Loaded as node-private parameters. -->
+      <rosparam command="load" file="$(arg box_model_config)"/>
+      <param name="module_id" value="$(arg robot_id)" type="int"/>
+      <param name="mocap_topic" value="$(arg mocap_topic)"/>
+      <param name="module_model_topic" value="/$(arg robot_ns)/unified_control/module_model"/>
+      <param name="root_frame" value="$(arg robot_ns)/root"/>
+      <param name="cog_frame" value="$(arg robot_ns)/cog"/>
+      <param name="world_frame" value="$(arg world_frame)"/>
+    </node>
+  </group>
+</launch>
