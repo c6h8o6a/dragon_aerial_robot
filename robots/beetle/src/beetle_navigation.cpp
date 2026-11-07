@@ -3,6 +3,8 @@
 #include <beetle/beetle_navigation.h>
 #include <aerial_robot_control/util/joy_parser.h>
 #include <limits>
+#include <algorithm>
+#include <cmath>
 
 using namespace aerial_robot_model;
 using namespace aerial_robot_navigation;
@@ -33,6 +35,11 @@ void BeetleNavigator::initialize(ros::NodeHandle nh, ros::NodeHandle nhp,
   GimbalrotorNavigator::initialize(nh, nhp, robot_model, estimator, loop_du);
   nh_ = nh;
   nhp_ = nhp;
+  
+  // Beetle 1をLeaderとして固定
+  setLeaderID(1);
+  leader_fix_flag_ = true;
+  
   cog_com_dist_pub_ = nh_.advertise<geometry_msgs::Point>("cog_com_dist", 1);
   assembly_nav_sub_ = nh_.subscribe("/assembly/uav/nav", 1, &BeetleNavigator::assemblyNavCallback, this);
   assembly_target_rot_sub_ = nh_.subscribe("/assembly/final_target_baselink_rot", 1, &BeetleNavigator::setAssemblyFinalTargetBaselinkRotCallback, this);
@@ -868,17 +875,107 @@ void BeetleNavigator::assemblyFlagCallback(const diagnostic_msgs::KeyValue & msg
   setAssemblyFlag(module_id,assembly_flag);
 }
 
+// void BeetleNavigator::update()
+// {
+//   rotateContactPointFrame();
+//   calcCenterOfMoving();
+  
+//   // Publish assembly CoG odom
+//   calculateAndPublishAssemblyCoGOdom();
+  
+//   GimbalrotorNavigator::update();
+//   setControlFlag((getNaviState() == HOVER_STATE || getNaviState() == TAKEOFF_STATE || getNaviState() == LAND_STATE) ? true : false);
+//   convertTargetPosFromCoG2CoM();
+//   land_height_ = getInitHeight();
+// }
 void BeetleNavigator::update()
 {
   rotateContactPointFrame();
   calcCenterOfMoving();
-  
-  // Publish assembly CoG odom
+
   calculateAndPublishAssemblyCoGOdom();
-  
+
+  const bool unified_assembled =
+      getUnifiedControlMode() &&
+      (getModuleState() == LEADER ||
+       getModuleState() == FOLLOWER);
+
+  // Module CoG -> Assembly CoG offset in world frame
+  auto getAssemblyOffsetWorld = [this]() -> tf::Vector3
+  {
+    tf::Transform cog2com_tf;
+    tf::transformKDLToTF(
+        getCog2CoM<KDL::Frame>(), cog2com_tf);
+
+    const tf::Vector3 baselink_rpy =
+        getFinalTargetBaselinkRPY();
+
+    const double yaw = getTargetRPY().z();
+
+    tf::Matrix3x3 R;
+    R.setRPY(
+        baselink_rpy.x(),
+        baselink_rpy.y(),
+        yaw);
+
+    return R * cog2com_tf.getOrigin();
+  };
+
+  tf::Vector3 old_offset(0, 0, 0);
+
+  if (unified_assembled)
+  {
+    std::lock_guard<std::recursive_mutex> lock(
+        target_mutex_);
+
+    old_offset = getAssemblyOffsetWorld();
+  }
+
+  // Updates target position and target yaw
   GimbalrotorNavigator::update();
-  setControlFlag((getNaviState() == HOVER_STATE || getNaviState() == TAKEOFF_STATE || getNaviState() == LAND_STATE) ? true : false);
+
+  if (unified_assembled)
+  {
+    std::lock_guard<std::recursive_mutex> lock(
+        target_mutex_);
+
+    const tf::Vector3 new_offset =
+        getAssemblyOffsetWorld();
+
+    // Compensate for the motion caused by yaw rotation
+    const tf::Vector3 correction =
+        old_offset - new_offset;
+
+    setTargetPosX(
+        getTargetPos().x() + correction.x());
+
+    setTargetPosY(
+        getTargetPos().y() + correction.y());
+
+    const tf::Vector3 target_assembly =
+        getTargetPos() + new_offset;
+
+    ROS_INFO_THROTTLE(
+        1.0,
+        "[UnifiedYawFix] id=%d "
+        "yaw=%.3f "
+        "assembly_target=(%.3f,%.3f) "
+        "correction=(%.4f,%.4f)",
+        my_id_,
+        getTargetRPY().z(),
+        target_assembly.x(),
+        target_assembly.y(),
+        correction.x(),
+        correction.y());
+  }
+
+  setControlFlag(
+      (getNaviState() == HOVER_STATE ||
+       getNaviState() == TAKEOFF_STATE ||
+       getNaviState() == LAND_STATE) ? true : false);
+
   convertTargetPosFromCoG2CoM();
+
   land_height_ = getInitHeight();
 }
 
@@ -910,6 +1007,7 @@ void BeetleNavigator::calcCenterOfMoving()
     module_state_snapshot = module_state_;
     pre_assembled_modules_snapshot = pre_assembled_modules_;
   }
+  
   // Mass-weighted center: matches BeetleUnifiedController::updateFormationGeometry().
   // Without weighting the navigator's Cog2CoM_ drifts ~5 mm from the controller's
   // formation_cog_offset_ under asymmetric per-module masses, opening a residual
@@ -1030,7 +1128,8 @@ void BeetleNavigator::calcCenterOfMoving()
   //update com-cog distance only during hovering
   bool reconfig_flag = false;
   if(control_flag_snapshot){
-    Eigen::Vector3f cog_com_dist(center_of_moving.norm() * center_of_moving.x()/fabs(center_of_moving.x()),0,0);
+    // Eigen::Vector3f cog_com_dist(center_of_moving.norm() * center_of_moving.x()/fabs(center_of_moving.x()),0,0);
+    Eigen::Vector3f cog_com_dist = center_of_moving;
     // ROS_INFO_STREAM("cog_com_dist is " << cog_com_dist.transpose());
     tf.transform.translation.x = cog_com_dist.x();
     tf.transform.translation.y = cog_com_dist.y();
@@ -1208,7 +1307,13 @@ void BeetleNavigator::calculateAndPublishAssemblyCoGOdom()
   
   // Calculate CoG orientation (quaternion average)
   Eigen::Quaterniond cog_quat = calculateAssemblyCoGOrientation();
-  
+  if (!cog_quat.coeffs().allFinite() ||
+    cog_quat.norm() < 1e-8) {
+    ROS_WARN_THROTTLE(
+        1.0,
+        "Assembly CoG odom skipped: invalid orientation");
+    return;
+  }
   // Fill Odometry message
   assembly_cog_odom_.header.stamp = ros::Time::now();
   assembly_cog_odom_.header.frame_id = "world";
@@ -1285,42 +1390,89 @@ Eigen::Vector3d BeetleNavigator::calculateAssemblyCoGPosition()
   return cog_pos / total_mass;
 }
 
+// Eigen::Quaterniond BeetleNavigator::calculateAssemblyCoGOrientation()
+// {
+//   std::vector<int> assembled_ids = getAssemblyIds();
+  
+//   // Simple quaternion averaging (suitable for small attitude differences <30°)
+//   Eigen::Vector4d quat_sum = Eigen::Vector4d::Zero();
+//   int count = 0;
+  
+//   for(int id : assembled_ids) {
+//     try {
+//       std::string frame_name = my_name_ + std::to_string(id) + "/cog";
+//       geometry_msgs::TransformStamped transform = 
+//         tfBuffer_.lookupTransform("world", frame_name, ros::Time(0));
+      
+//       quat_sum.x() += transform.transform.rotation.x;
+//       quat_sum.y() += transform.transform.rotation.y;
+//       quat_sum.z() += transform.transform.rotation.z;
+//       quat_sum.w() += transform.transform.rotation.w;
+//       count++;
+      
+//     } catch(tf2::TransformException& ex) {
+//       ROS_WARN_THROTTLE(5.0, "[BeetleNavigator] Failed to get rotation for %s%d: %s", 
+//                         my_name_.c_str(), id, ex.what());
+//     }
+//   }
+  
+//   if(count > 0) {
+//     quat_sum /= count;
+//     quat_sum.normalize();
+//   } else {
+//     quat_sum = Eigen::Vector4d(0, 0, 0, 1);  // Default no rotation
+//   }
+  
+//   return Eigen::Quaterniond(quat_sum.w(), quat_sum.x(), quat_sum.y(), quat_sum.z());
+// }
 Eigen::Quaterniond BeetleNavigator::calculateAssemblyCoGOrientation()
 {
-  std::vector<int> assembled_ids = getAssemblyIds();
-  
-  // Simple quaternion averaging (suitable for small attitude differences <30°)
-  Eigen::Vector4d quat_sum = Eigen::Vector4d::Zero();
-  int count = 0;
-  
-  for(int id : assembled_ids) {
-    try {
-      std::string frame_name = my_name_ + std::to_string(id) + "/cog";
-      geometry_msgs::TransformStamped transform = 
-        tfBuffer_.lookupTransform("world", frame_name, ros::Time(0));
-      
-      quat_sum.x() += transform.transform.rotation.x;
-      quat_sum.y() += transform.transform.rotation.y;
-      quat_sum.z() += transform.transform.rotation.z;
-      quat_sum.w() += transform.transform.rotation.w;
-      count++;
-      
-    } catch(tf2::TransformException& ex) {
-      ROS_WARN_THROTTLE(5.0, "[BeetleNavigator] Failed to get rotation for %s%d: %s", 
-                        my_name_.c_str(), id, ex.what());
-    }
-  }
-  
-  if(count > 0) {
-    quat_sum /= count;
-    quat_sum.normalize();
-  } else {
-    quat_sum = Eigen::Vector4d(0, 0, 0, 1);  // Default no rotation
-  }
-  
-  return Eigen::Quaterniond(quat_sum.w(), quat_sum.x(), quat_sum.y(), quat_sum.z());
-}
+    const std::vector<int> assembled_ids = getAssemblyIds();
+    const int leader_id = getLeaderID();
 
+    const double nan =
+        std::numeric_limits<double>::quiet_NaN();
+
+    const Eigen::Quaterniond invalid(nan, nan, nan, nan);
+
+    if (std::find(
+            assembled_ids.begin(),
+            assembled_ids.end(),
+            leader_id) == assembled_ids.end()) {
+        return invalid;
+    }
+
+    try {
+        const std::string leader_cog_frame =
+            my_name_ + std::to_string(leader_id) + "/cog";
+
+        const auto tf_world_leader =
+            tfBuffer_.lookupTransform(
+                "world", leader_cog_frame, ros::Time(0));
+
+        const auto& q = tf_world_leader.transform.rotation;
+
+        Eigen::Quaterniond q_world_assembly(
+            q.w, q.x, q.y, q.z);
+
+        if (!q_world_assembly.coeffs().allFinite() ||
+            q_world_assembly.norm() < 1e-8) {
+            return invalid;
+        }
+
+        q_world_assembly.normalize();
+
+        return q_world_assembly;
+
+    } catch (const tf2::TransformException& ex) {
+        ROS_WARN_THROTTLE(
+            1.0,
+            "Assembly orientation TF failed: %s",
+            ex.what());
+
+        return invalid;
+    }
+}
 
 /* plugin registration */
 #include <pluginlib/class_list_macros.h>

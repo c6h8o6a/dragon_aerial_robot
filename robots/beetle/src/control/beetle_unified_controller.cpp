@@ -309,7 +309,8 @@ void BeetleUnifiedController::setModuleModelDescriptor(
   std::lock_guard<std::mutex> lock(module_model_mutex_);
   auto prev = module_models_.find(module_id);
   if (prev != module_models_.end()) {
-    bool same = std::abs(prev->second.mass - model.mass) < 1e-9 &&
+    bool same = prev->second.is_passive == model.is_passive &&
+                std::abs(prev->second.mass - model.mass) < 1e-9 &&
                 (prev->second.inertia - model.inertia).norm() < 1e-9 &&
                 std::abs(prev->second.mf_rate - model.mf_rate) < 1e-12 &&
                 prev->second.rotor_direction == model.rotor_direction &&
@@ -356,6 +357,14 @@ bool BeetleUnifiedController::getModuleBodyOffsetFromLeader(
   return getCachedModuleOffsetFromLeader(module_id, offset);
 }
 
+bool BeetleUnifiedController::getModuleRotationFromLeader(
+    int module_id,
+    Eigen::Matrix3d& rotation) const
+{
+    return getCachedModuleRotationFromLeader(
+        module_id, rotation);
+}
+
 bool BeetleUnifiedController::lookupModuleOffsetFromLeader(
     int module_id, Eigen::Vector3d& offset) const
 {
@@ -391,6 +400,77 @@ Eigen::Vector3d BeetleUnifiedController::getModuleOffsetFromLeader(int module_id
   Eigen::Vector3d offset = Eigen::Vector3d::Zero();
   lookupModuleOffsetFromLeader(module_id, offset);
   return offset;
+}
+
+//add
+bool BeetleUnifiedController::lookupModuleRotationFromLeader(
+    int module_id,
+    Eigen::Matrix3d& rotation) const
+{
+    rotation.setIdentity();
+
+    const int leader_id = navigator_->getLeaderID();
+
+    if (module_id == leader_id) {
+        return true;
+    }
+
+    try {
+        const std::string leader_frame =
+            navigator_->getMyName() +
+            std::to_string(leader_id) + "/root";
+
+        const std::string module_frame =
+            navigator_->getMyName() +
+            std::to_string(module_id) + "/root";
+
+        const auto tf_stamped =
+            navigator_->getTfBuffer().lookupTransform(
+                leader_frame,
+                module_frame,
+                ros::Time(0));
+
+        const auto& q_tf =
+            tf_stamped.transform.rotation;
+
+        Eigen::Quaterniond q(
+            q_tf.w,
+            q_tf.x,
+            q_tf.y,
+            q_tf.z);
+
+        if (!q.coeffs().allFinite() ||
+            q.norm() < 1e-8) {
+            return false;
+        }
+
+        q.normalize();
+        rotation = q.toRotationMatrix();
+
+        return true;
+
+    } catch (const tf2::TransformException& ex) {
+        ROS_WARN_THROTTLE(
+            1.0,
+            "[UnifiedCtrl] Module rotation TF failed: %s",
+            ex.what());
+        return false;
+    }
+}
+bool BeetleUnifiedController::getCachedModuleRotationFromLeader(
+    int module_id,
+    Eigen::Matrix3d& rotation) const
+{
+    const auto it =
+        cached_module_rotations_from_leader_.find(module_id);
+
+    if (it != cached_module_rotations_from_leader_.end()) {
+        rotation = it->second;
+        return true;
+    }
+
+    return lookupModuleRotationFromLeader(
+        module_id, rotation);
 }
 
 bool BeetleUnifiedController::getCachedModuleOffsetFromLeader(
@@ -438,6 +518,7 @@ bool BeetleUnifiedController::updateFormationGeometry()
     formation_mass_ = external_formation_mass_;
     formation_cog_offset_ = external_formation_cog_offset_;
     formation_inertia_ = external_formation_inertia_;
+    
     cached_assembled_ids_.clear();  // invalidate cache so next non-external call refreshes
     cached_module_offsets_from_leader_.clear();
     return true;
@@ -460,12 +541,34 @@ bool BeetleUnifiedController::updateFormationGeometry()
       model_revision == cached_module_model_revision_) return true;
 
   int N = assembled_ids.size();
-  if (ids_changed) cached_module_offsets_from_leader_.clear();
+  if (ids_changed) {
+    cached_module_offsets_from_leader_.clear();
+    cached_module_rotations_from_leader_.clear();
+  };
+  // for (int module_id : assembled_ids) {
+  //   if (cached_module_offsets_from_leader_.count(module_id) > 0) continue;
+  //   Eigen::Vector3d module_offset;
+  //   if (!lookupModuleOffsetFromLeader(module_id, module_offset)) return false;
+  //   cached_module_offsets_from_leader_[module_id] = module_offset;
+  // }
   for (int module_id : assembled_ids) {
-    if (cached_module_offsets_from_leader_.count(module_id) > 0) continue;
-    Eigen::Vector3d module_offset;
-    if (!lookupModuleOffsetFromLeader(module_id, module_offset)) return false;
-    cached_module_offsets_from_leader_[module_id] = module_offset;
+    if (cached_module_offsets_from_leader_.count(module_id) == 0) {
+      Eigen::Vector3d offset;
+
+      if (!lookupModuleOffsetFromLeader(
+                module_id, offset)) {
+            return false;
+      }
+      cached_module_offsets_from_leader_[module_id] = offset;
+    }
+    if (cached_module_rotations_from_leader_.count(module_id) == 0) {
+      Eigen::Matrix3d rotation;
+      if (!lookupModuleRotationFromLeader(
+                module_id, rotation)) {
+	return false;
+      }
+      cached_module_rotations_from_leader_[module_id] = rotation;
+    }
   }
 
   formation_mass_ = 0.0;
@@ -496,8 +599,29 @@ bool BeetleUnifiedController::updateFormationGeometry()
   }
   formation_cog_offset_ = weighted_cog_offset / formation_mass_;
   formation_inertia_ = computeFormationInertia(assembled_ids, formation_cog_offset_);
+  //add
+  // NaN・無限大の確認
+  if (!formation_inertia_.allFinite()) {
+    ROS_ERROR_THROTTLE(
+		       1.0, "[UnifiedCtrl] Non-finite formation inertia");
+    formation_mass_ = 0.0;
+    return false;
+  }
+  // 正定値性の確認
+  const Eigen::Matrix3d symmetric_inertia = 0.5 * (formation_inertia_ + formation_inertia_.transpose());
+  Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> eig(symmetric_inertia);
+  if (eig.info() != Eigen::Success ||
+      eig.eigenvalues().minCoeff() <= 1e-9) {
+    ROS_ERROR_THROTTLE(
+		       1.0, "[UnifiedCtrl] Invalid formation inertia");
+    formation_mass_ = 0.0;
+    return false;
+  }
+ 
   cached_assembled_ids_ = assembled_ids;  // ε-fix: latch
   cached_module_model_revision_ = model_revision;
+  //add
+  ++formation_geometry_revision_;
   // Geometry actually changed → spinals' one-shot torque_alloc_inv + cascade
   // gains are stale. Re-arm so computeUnifiedAllocation() will re-send this
   // cycle (leader). Followers detect via getFormationRevision() bump from the
@@ -536,6 +660,28 @@ bool BeetleUnifiedController::computeUnifiedAllocation(
                       N);
     return false;
   }
+  //add
+  std::vector<int> active_ids;
+  for (int module_id : assembled_ids) {
+    ModuleModelDescriptor model;
+    if (!getModuleModelDescriptor(module_id, model)) {
+        ROS_ERROR_THROTTLE(
+            1.0,
+            "[UnifiedCtrl] Missing ModuleModel id=%d",
+            module_id);
+        return false;
+    }
+    if (!model.is_passive) {
+      active_ids.push_back(module_id);
+    }
+  }
+
+  if (active_ids.empty()) {
+    ROS_ERROR_THROTTLE(
+		       1.0,
+		       "[UnifiedCtrl] No active modules");
+    return false;
+  }
 
   std::lock_guard<std::mutex> alloc_lock(allocation_mutex_);
 
@@ -553,9 +699,22 @@ bool BeetleUnifiedController::computeUnifiedAllocation(
 
   // Build formation-wide allocation matrix (6 x rotor_coef*total_rotors).
   integrated_map_ = buildFormationAllocationMatrix(
-      assembled_ids, formation_mass_, formation_inertia_, formation_cog_offset_,
+      active_ids, formation_mass_, formation_inertia_, formation_cog_offset_,
       allocation_cog_from_body_, masked_rot_cog);
-
+  //add
+  const int expected_cols =static_cast<int>(active_ids.size()) *motor_num_per_module_ * rotor_coef_;
+  if (integrated_map_.rows() != 6 ||
+      integrated_map_.cols() != expected_cols ||
+      !integrated_map_.allFinite() ||
+      integrated_map_.norm() < 1e-12) {
+    ROS_ERROR_THROTTLE(
+		       1.0,
+		       "[UnifiedCtrl] Invalid allocation matrix: %ldx%ld",
+		       integrated_map_.rows(),
+		       integrated_map_.cols());
+    return false;
+  }
+  
   // Pseudoinverse
   integrated_map_inv_ = aerial_robot_model::pseudoinverse(integrated_map_);
 
@@ -638,7 +797,7 @@ bool BeetleUnifiedController::computeUnifiedAllocation(
   Eigen::VectorXd desired_wrench_acc =
       control_wrench_acc + task_wrench_acc + feedback_wrench_acc;
   Eigen::VectorXd secondary_ref =
-      buildSecondaryAllocationReference(assembled_ids, task_wrench_acc);
+      buildSecondaryAllocationReference(active_ids, task_wrench_acc);
 
   Eigen::MatrixXd interface_actuation_matrix;
   Eigen::VectorXd interface_required_wrench;
@@ -677,7 +836,7 @@ bool BeetleUnifiedController::computeUnifiedAllocation(
                                    task_wrench_acc, effective_task_weights,
                                    feedback_wrench_acc, effective_feedback_weights,
                                    priority_wrench_acc,
-                                   secondary_ref, assembled_ids,
+                                   secondary_ref,active_ids, assembled_ids,
                                    interface_actuation_matrix,
                                    interface_required_wrench,
                                    target_vectoring_f_);
@@ -696,14 +855,14 @@ bool BeetleUnifiedController::computeUnifiedAllocation(
         // Keep the secondary actuator center task-consistent without feeding
         // dynamic control/observer feedback through a second QP path.
         Eigen::VectorXd retry_secondary_ref =
-            buildSecondaryAllocationReference(assembled_ids,
+            buildSecondaryAllocationReference(active_ids,
                                               retry_task_wrench_acc);
 
         qp_ok = solveFullVectorQP(integrated_map_, control_wrench_acc,
                                   retry_task_wrench_acc, retry_task_weights,
                                   retry_feedback_wrench_acc, retry_feedback_weights,
                                   retry_priority_acc,
-                                  retry_secondary_ref, assembled_ids,
+                                  retry_secondary_ref,active_ids, assembled_ids,
                                   interface_actuation_matrix,
                                   interface_required_wrench,
                                   target_vectoring_f_);
@@ -748,7 +907,18 @@ bool BeetleUnifiedController::computeUnifiedAllocation(
   }
   pinv_vectoring_f =
       integrated_map_inv_ * (control_wrench_acc + task_wrench_acc + feedback_wrench_acc);
-  publishAllocationPwmPredictions(target_vectoring_f_, pinv_vectoring_f, assembled_ids);
+  //add
+  if (target_vectoring_f_.size() != expected_cols ||
+      !target_vectoring_f_.allFinite()) {
+    ROS_ERROR_THROTTLE(
+		       1.0,
+		       "[UnifiedCtrl] Invalid allocated thrust vector");
+    return false;
+  }
+  // 成功した推力配分と機体IDの対応を保存
+  allocation_active_ids_ = active_ids;
+ 
+  publishAllocationPwmPredictions(target_vectoring_f_, pinv_vectoring_f, active_ids);
 
   // Target attitude for spinal inner loop is the operator's commanded attitude
   // (navigator->target_rpy_), NOT atan2(target_acc) derived from XY-PID.
@@ -770,7 +940,7 @@ bool BeetleUnifiedController::computeUnifiedAllocation(
   } else {
     int yaw_col = 5; // yaw is the 6th column (index 5) in the 6-DOF wrench
     double max_yaw_scale = 0;
-    int total_motors = assembled_ids.size() * motor_num_per_module_;
+    int total_motors = active_ids.size() * motor_num_per_module_;
     for (int i = 0; i < total_motors; i++) {
       if (integrated_map_inv_(i * rotor_coef_, yaw_col) > max_yaw_scale)
         max_yaw_scale = integrated_map_inv_(i * rotor_coef_, yaw_col);
@@ -779,8 +949,8 @@ bool BeetleUnifiedController::computeUnifiedAllocation(
   }
 
   // Extract per-rotor scalar thrust + gimbal angles (for debug/visualization)
-  extractThrustAndGimbal(target_vectoring_f_, assembled_ids);
-  publishGimbalTracking(assembled_ids);
+  extractThrustAndGimbal(target_vectoring_f_, active_ids);
+  publishGimbalTracking(active_ids);
   if (interface_load_pub_.getNumSubscribers() > 0 &&
       interface_actuation_matrix.rows() > 0) {
     publishInterfaceLoadDiagnostics(interface_actuation_matrix,
@@ -830,22 +1000,24 @@ bool BeetleUnifiedController::computeUnifiedAllocation(
 }
 
 Eigen::VectorXd BeetleUnifiedController::buildSecondaryAllocationReference(
-    const std::vector<int>& assembled_ids,
+    const std::vector<int>& active_ids,
     const Eigen::VectorXd& task_wrench_acc) const
 {
-  const int n_rotors = static_cast<int>(assembled_ids.size()) * motor_num_per_module_;
+  const int n_rotors = static_cast<int>(active_ids.size()) * motor_num_per_module_;
   Eigen::VectorXd ref = Eigen::VectorXd::Zero(rotor_coef_ * n_rotors);
   if (n_rotors <= 0 || rotor_coef_ <= 0 || formation_mass_ <= 0.0) {
     return ref;
   }
 
-  for (size_t m = 0; m < assembled_ids.size(); m++) {
-    ModuleModelDescriptor model;
-    if (!getModuleModelDescriptor(assembled_ids[m], model)) {
-      return ref;
-    }
-    const double hover_per_rotor = model.mass * aerial_robot_estimation::G / motor_num_per_module_;
-    const double bounded_hover = std::max(0.0, std::min(hover_per_rotor, alloc_t_max_));
+  // ModuleModelDescriptor model;
+  // if (!getModuleModelDescriptor(assembled_ids[m], model)) {
+  //   return ref;
+  // }
+  //changed
+  const double hover_per_rotor = formation_mass_ * aerial_robot_estimation::G / static_cast<double>(n_rotors);
+  const double bounded_hover = std::max(0.0, std::min(hover_per_rotor, alloc_t_max_));
+    
+  for (size_t m = 0; m < active_ids.size(); m++) {
     const int module_col = static_cast<int>(m) * motor_num_per_module_ * rotor_coef_;
     for (int r = 0; r < motor_num_per_module_; r++) {
       ref(module_col + r * rotor_coef_ + rotor_coef_ - 1) = bounded_hover;
@@ -1002,12 +1174,33 @@ bool BeetleUnifiedController::buildInterfaceLoadModelWithMasks(
     return false;
   }
 
+  // std::vector<int> chain_ids;
+  // std::map<int, int> allocation_indices;
+  // if (!getPhysicalChainOrder(allocation_ids, chain_ids, allocation_indices)) return false;
+  //add
   std::vector<int> chain_ids;
   std::map<int, int> allocation_indices;
-  if (!getPhysicalChainOrder(allocation_ids, chain_ids, allocation_indices)) return false;
+  if (!getPhysicalChainOrder(
+			     allocation_ids, chain_ids, allocation_indices)) {
+    return false;
+  }
+  //能動モジュールの推力列インデックス
+  std::map<int, int> active_indices;
+  int active_count = 0;
+  for (int module_id : allocation_ids) {
+    ModuleModelDescriptor model;
+    if (!getModuleModelDescriptor(module_id, model)) {
+      return false;
+    }
+    if (!model.is_passive) {
+      active_indices[module_id] = active_count++;
+    }
+  }
 
-  const int total_cols = n_modules * motor_num_per_module_ * rotor_coef_;
-  interface_actuation_matrix = Eigen::MatrixXd::Zero(6 * (n_modules - 1), total_cols);
+  // const int total_cols = n_modules * motor_num_per_module_ * rotor_coef_;
+  // interface_actuation_matrix = Eigen::MatrixXd::Zero(6 * (n_modules - 1), total_cols);
+  const int total_cols = active_count * motor_num_per_module_ * rotor_coef_;
+  interface_actuation_matrix =Eigen::MatrixXd::Zero(6 * (n_modules - 1), total_cols);
   interface_required_wrench = Eigen::VectorXd::Zero(6 * (n_modules - 1));
   interface_cuts.reserve(n_modules - 1);
 
@@ -1064,7 +1257,14 @@ bool BeetleUnifiedController::buildInterfaceLoadModelWithMasks(
         interface_cuts.clear();
         return false;
       }
-
+      //add
+      Eigen::Matrix3d R_Lj;
+      if (!getCachedModuleRotationFromLeader(module_id, R_Lj)) {
+	return false;
+      }
+      const Eigen::Matrix3d inertia_leader =
+	R_Lj * model.inertia * R_Lj.transpose();
+ 
       const Eigen::Vector3d module_offset_from_formation_cog =
           module_offsets.at(module_id) - formation_cog_offset_;
       const Eigen::Vector3d angular_acc =
@@ -1074,15 +1274,25 @@ bool BeetleUnifiedController::buildInterfaceLoadModelWithMasks(
                         angular_acc.cross(module_offset_from_formation_cog));
       interface_required_wrench.segment<3>(row_start) += required_force;
       interface_required_wrench.segment<3>(row_start + 3) +=
-          model.inertia * angular_acc +
+          inertia_leader * angular_acc +
           (module_offset_from_formation_cog - cut_point).cross(required_force);
-
-      const int module_col = allocation_indices.at(module_id) *
-                             motor_num_per_module_ * rotor_coef_;
+      //add 受動箱：質量・慣性は計算済み
+      // 推力列は生成しない
+      if (model.is_passive) {
+	continue;
+      }
+      const auto active_it = active_indices.find(module_id);
+      if (active_it == active_indices.end()) {
+	return false;
+      }
+      const int module_col = active_it->second * motor_num_per_module_ * rotor_coef_;
+ 
+      // const int module_col = allocation_indices.at(module_id) *
+      //                        motor_num_per_module_ * rotor_coef_;
 
       for (int r = 0; r < motor_num_per_module_; r++) {
         const Eigen::Vector3d rotor_pos =
-            module_offset_from_formation_cog + model.rotor_origins_from_cog.at(r);
+            module_offset_from_formation_cog + R_Lj*model.rotor_origins_from_cog.at(r);
         const int dir = model.rotor_direction.at(r + 1);
 
         Eigen::MatrixXd wrench_map = Eigen::MatrixXd::Zero(6, 3);
@@ -1093,7 +1303,7 @@ bool BeetleUnifiedController::buildInterfaceLoadModelWithMasks(
 
         const int col_start = module_col + r * rotor_coef_;
         interface_actuation_matrix.block(row_start, col_start, 6, rotor_coef_) =
-            wrench_map * masked_rot_body[r];
+	  wrench_map *(R_Lj* masked_rot_body[r]);
       }
     }
   }
@@ -1685,6 +1895,7 @@ bool BeetleUnifiedController::solveFullVectorQP(
     const Eigen::VectorXd& feedback_weights,
     const Eigen::VectorXd& w_priority,
     const Eigen::VectorXd& secondary_ref,
+    const std::vector<int>& active_ids,
     const std::vector<int>& assembled_ids,
     const Eigen::MatrixXd& interface_actuation_matrix,
     const Eigen::VectorXd& interface_required_wrench,
@@ -1909,8 +2120,8 @@ bool BeetleUnifiedController::solveFullVectorQP(
     q_vec -= alloc_effort_weight_ * f_ref;
   }
 
-  for (int m = 0; m < static_cast<int>(assembled_ids.size()); m++) {
-    const double module_weight = getModuleAllocationWeight(assembled_ids[m]);
+  for (int m = 0; m < static_cast<int>(active_ids.size()); m++) {
+    const double module_weight = getModuleAllocationWeight(active_ids[m]);
     const double reg_weight = alloc_lambda_ * module_weight;
     const int module_col = m * motor_num_per_module_ * rotor_coef_;
     for (int r = 0; r < motor_num_per_module_ * rotor_coef_; r++) {
@@ -1941,7 +2152,7 @@ bool BeetleUnifiedController::solveFullVectorQP(
   // sums each module's f_z and M = I - (1/N) 11^T centers them. Pure quadratic
   // (the mean is intrinsic), so it only adds to the Hessian.
   if (alloc_module_balance_weight_ > 0.0 && rotor_coef_ == 2) {
-    const int n_modules = static_cast<int>(assembled_ids.size());
+    const int n_modules = static_cast<int>(active_ids.size());
     if (n_modules > 1) {
       Eigen::MatrixXd S = Eigen::MatrixXd::Zero(n_modules, n_cols);
       for (int m = 0; m < n_modules; m++) {
@@ -2311,9 +2522,14 @@ void BeetleUnifiedController::extractThrustAndGimbal(
 
 int BeetleUnifiedController::getModuleIndex(int module_id) const
 {
-  std::vector<int> assembled_ids = navigator_->getAssemblyIds();
-  for (size_t index = 0; index < assembled_ids.size(); index++) {
-    if (assembled_ids[index] == module_id) return static_cast<int>(index);
+  // std::vector<int> assembled_ids = navigator_->getAssemblyIds();
+  // for (size_t index = 0; index < assembled_ids.size(); index++) {
+  //   if (assembled_ids[index] == module_id) return static_cast<int>(index);
+  // }
+  for (size_t i = 0; i < allocation_active_ids_.size(); i++) {
+    if (allocation_active_ids_[i] == module_id) {
+      return static_cast<int>(i);
+    }
   }
   return -1;
 }
@@ -2487,12 +2703,43 @@ bool BeetleUnifiedController::buildModuleTorqueAllocationMatrixInvLocked(
   int row_start = module_index * rows_per_module;
   if (integrated_map_inv_rot_.rows() < row_start + rows_per_module) return false;
 
-  msg.rows.resize(rows_per_module);
-  for (int i = 0; i < rows_per_module; i++) {
-    msg.rows[i].x = static_cast<int16_t>(integrated_map_inv_rot_(row_start + i, 0) * 1000);
-    msg.rows[i].y = static_cast<int16_t>(integrated_map_inv_rot_(row_start + i, 1) * 1000);
-    msg.rows[i].z = static_cast<int16_t>(integrated_map_inv_rot_(row_start + i, 2) * 1000);
-  }
+  // msg.rows.resize(rows_per_module);
+  // for (int i = 0; i < rows_per_module; i++) {
+  //   msg.rows[i].x = static_cast<int16_t>(integrated_map_inv_rot_(row_start + i, 0) * 1000);
+  //   msg.rows[i].y = static_cast<int16_t>(integrated_map_inv_rot_(row_start + i, 1) * 1000);
+  //   msg.rows[i].z = static_cast<int16_t>(integrated_map_inv_rot_(row_start + i, 2) * 1000);
+  // }
+  Eigen::Matrix3d R_Li;
+
+if (!getCachedModuleRotationFromLeader(
+        module_id, R_Li)) {
+    return false;
+}
+
+// Module仮想CoG座標系 → Leader仮想CoG座標系
+const Eigen::Matrix3d R_CL_Ci =
+    allocation_cog_from_body_
+    * R_Li
+    * allocation_cog_from_body_.transpose();
+
+// Leader基準の逆配分行列を
+// Moduleローカル姿勢誤差に対応させる
+const Eigen::MatrixXd local_inv =
+    integrated_map_inv_rot_.middleRows(
+        row_start, rows_per_module) * R_CL_Ci;
+
+msg.rows.resize(rows_per_module);
+
+for (int i = 0; i < rows_per_module; i++) {
+    msg.rows[i].x = static_cast<int16_t>(
+        local_inv(i, 0) * 1000);
+
+    msg.rows[i].y = static_cast<int16_t>(
+        local_inv(i, 1) * 1000);
+
+    msg.rows[i].z = static_cast<int16_t>(
+        local_inv(i, 2) * 1000);
+}
   return true;
 }
 
@@ -2635,14 +2882,14 @@ void BeetleUnifiedController::cacheCascadeGains(
 // ---- Formation Allocation Matrix (same math as Plan A / GimbalrotorController) ----
 
 Eigen::MatrixXd BeetleUnifiedController::buildFormationAllocationMatrix(
-    const std::vector<int>& assembled_ids,
+    const std::vector<int>& active_ids,
     double formation_mass,
     const Eigen::Matrix3d& formation_inertia_body,
     const Eigen::Vector3d& formation_cog_offset_body,
     const Eigen::Matrix3d& cog_from_body,
     const std::vector<Eigen::MatrixXd>& masked_rot_cog)
 {
-  int N = assembled_ids.size();
+  int N = active_ids.size();
   int total_rotors = N * motor_num_per_module_;
   double mass_inv = 1.0 / formation_mass;
   const Eigen::Matrix3d formation_inertia_cog =
@@ -2655,23 +2902,28 @@ Eigen::MatrixXd BeetleUnifiedController::buildFormationAllocationMatrix(
   wrench_map.block(0, 0, 3, 3) = Eigen::MatrixXd::Identity(3, 3);
 
   int col = 0;
-  for (int m = 0; m < N; m++) {
-    int module_id = assembled_ids[m];
+  for (int module_id : active_ids) {
     ModuleModelDescriptor model;
-    if (!getModuleModelDescriptor(module_id, model)) {
-      ROS_WARN_THROTTLE(1.0, "[UnifiedCtrl] Allocation blocked: missing ModuleModel id=%d", module_id);
-      return Eigen::MatrixXd::Zero(6, rotor_coef_ * total_rotors);
+    if (!getModuleModelDescriptor(module_id, model)||model.is_passive) {
+      ROS_WARN_THROTTLE(1.0, "[UnifiedCtrl] Allocation blocked: missing ModuleModel id=%d or not active", module_id);
+      return Eigen::MatrixXd();
     }
 
     Eigen::Vector3d module_offset = Eigen::Vector3d::Zero();
+    //add
+    Eigen::Matrix3d R_Lj;
+    if (!getCachedModuleRotationFromLeader(module_id, R_Lj)) {
+      return Eigen::MatrixXd();
+    }
+    
     if (!getCachedModuleOffsetFromLeader(module_id, module_offset)) {
-      return Eigen::MatrixXd::Zero(6, rotor_coef_ * total_rotors);
+      return Eigen::MatrixXd();
     }
 
     for (int r = 0; r < motor_num_per_module_; r++) {
       const Eigen::Vector3d rotor_pos_body =
           module_offset - formation_cog_offset_body +
-          model.rotor_origins_from_cog.at(r);
+          R_Lj*model.rotor_origins_from_cog.at(r);
       const Eigen::Vector3d rotor_pos_cog = cog_from_body * rotor_pos_body;
       int dir = model.rotor_direction.at(r + 1);
       wrench_map.block(3, 0, 3, 3) =
@@ -2689,39 +2941,111 @@ Eigen::MatrixXd BeetleUnifiedController::buildFormationAllocationMatrix(
   // Block-diagonal integrated_rot
   int total_cols = rotor_coef_ * total_rotors;
   Eigen::MatrixXd integrated_rot = Eigen::MatrixXd::Zero(3 * total_rotors, total_cols);
+  // for (int m = 0; m < N; m++) {
+  //   for (int r = 0; r < motor_num_per_module_; r++) {
+  //     int rotor_idx = m * motor_num_per_module_ + r;
+  //     integrated_rot.block(3 * rotor_idx, rotor_coef_ * rotor_idx,
+  //                          3, rotor_coef_) = masked_rot_cog[r];
+  //   }
+  // }
+  //changed
   for (int m = 0; m < N; m++) {
+    Eigen::Matrix3d R_Lj;
+    if (!getCachedModuleRotationFromLeader(
+            active_ids[m], R_Lj)) {
+        return Eigen::MatrixXd();
+    }
+    // ローカル仮想CoG座標系から
+    // リーダーの仮想CoG座標系への変換
+    const Eigen::Matrix3d R_cog_module =
+      cog_from_body * R_Lj * cog_from_body.transpose();
     for (int r = 0; r < motor_num_per_module_; r++) {
-      int rotor_idx = m * motor_num_per_module_ + r;
-      integrated_rot.block(3 * rotor_idx, rotor_coef_ * rotor_idx,
-                           3, rotor_coef_) = masked_rot_cog[r];
+        const int rotor_idx =
+            m * motor_num_per_module_ + r;
+        integrated_rot.block(
+            3 * rotor_idx,
+            rotor_coef_ * rotor_idx,
+            3, rotor_coef_) =
+                R_cog_module * masked_rot_cog[r];
     }
   }
 
   return full_q_mat * integrated_rot;
 }
 
+// Eigen::Matrix3d BeetleUnifiedController::computeFormationInertia(
+//     const std::vector<int>& assembled_ids,
+//     const Eigen::Vector3d& formation_cog_offset)
+// {
+//   Eigen::Matrix3d formation_inertia = Eigen::Matrix3d::Zero();
+
+//   for (int module_id : assembled_ids) {
+//     ModuleModelDescriptor model;
+//     if (!getModuleModelDescriptor(module_id, model)) {
+//       ROS_WARN_THROTTLE(1.0, "[UnifiedCtrl] Inertia synthesis blocked: missing ModuleModel id=%d", module_id);
+//       return Eigen::Matrix3d::Constant(std::numeric_limits<double>::quiet_NaN());
+//     }
+//     Eigen::Vector3d d = Eigen::Vector3d::Zero();
+//     if (!getCachedModuleOffsetFromLeader(module_id, d)) {
+//       return Eigen::Matrix3d::Constant(std::numeric_limits<double>::quiet_NaN());
+//     }
+//     d -= formation_cog_offset;
+//     formation_inertia += R_Lj*model.inertia*R_Lj.transpose()
+//                        + model.mass * (d.dot(d) * Eigen::Matrix3d::Identity() - d * d.transpose());
+//   }
+
+//   return formation_inertia;
+// }
 Eigen::Matrix3d BeetleUnifiedController::computeFormationInertia(
     const std::vector<int>& assembled_ids,
     const Eigen::Vector3d& formation_cog_offset)
 {
-  Eigen::Matrix3d formation_inertia = Eigen::Matrix3d::Zero();
+    Eigen::Matrix3d formation_inertia =
+        Eigen::Matrix3d::Zero();
 
-  for (int module_id : assembled_ids) {
-    ModuleModelDescriptor model;
-    if (!getModuleModelDescriptor(module_id, model)) {
-      ROS_WARN_THROTTLE(1.0, "[UnifiedCtrl] Inertia synthesis blocked: missing ModuleModel id=%d", module_id);
-      return Eigen::Matrix3d::Zero();
-    }
-    Eigen::Vector3d d = Eigen::Vector3d::Zero();
-    if (!getCachedModuleOffsetFromLeader(module_id, d)) {
-      return Eigen::Matrix3d::Identity();
-    }
-    d -= formation_cog_offset;
-    formation_inertia += model.inertia
-                       + model.mass * (d.dot(d) * Eigen::Matrix3d::Identity() - d * d.transpose());
-  }
+    const Eigen::Matrix3d invalid =
+        Eigen::Matrix3d::Constant(
+            std::numeric_limits<double>::quiet_NaN());
 
-  return formation_inertia;
+    for (int module_id : assembled_ids) {
+
+        ModuleModelDescriptor model;
+
+        if (!getModuleModelDescriptor(module_id, model)) {
+            return invalid;
+        }
+
+        Eigen::Vector3d module_offset;
+
+        if (!getCachedModuleOffsetFromLeader(
+                module_id, module_offset)) {
+            return invalid;
+        }
+
+        Eigen::Matrix3d R_Lj;
+
+        if (!getCachedModuleRotationFromLeader(
+                module_id, R_Lj)) {
+            return invalid;
+        }
+
+        const Eigen::Vector3d d =
+            module_offset - formation_cog_offset;
+
+        // ローカル慣性をリーダー座標系へ変換
+        const Eigen::Matrix3d inertia_leader =
+            R_Lj * model.inertia * R_Lj.transpose();
+
+        // 平行軸の定理
+        const Eigen::Matrix3d parallel_axis =
+            model.mass * (
+                d.squaredNorm() * Eigen::Matrix3d::Identity()
+                - d * d.transpose());
+
+        formation_inertia += inertia_leader + parallel_axis;
+    }
+
+    return formation_inertia;
 }
 
 } // namespace aerial_robot_control

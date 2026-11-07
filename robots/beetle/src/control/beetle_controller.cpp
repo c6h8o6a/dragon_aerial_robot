@@ -1027,6 +1027,16 @@ namespace aerial_robot_control
         }
         for (const int peer_id : assembled_ids) {
           if (peer_id == beetle_navigator_->getMyID()) continue;
+
+	  BeetleUnifiedController::ModuleModelDescriptor model;
+	  if (!unified_controller_->getModuleModelDescriptor(peer_id, model)) {
+	    ROS_ERROR_THROTTLE(1.0,
+			       "Missing ModuleModel id=%d", peer_id);
+	    navigator_->requestForceLanding();
+	    break;
+	  }
+	  if (model.is_passive) continue;
+ 
           const auto it = peer_stamp_snapshot.find(peer_id);
           const double age = (it == peer_stamp_snapshot.end()) ? -1.0 : now - it->second;
           if (it == peer_stamp_snapshot.end() ||
@@ -1414,6 +1424,7 @@ namespace aerial_robot_control
     beetle::ModuleModel msg;
     msg.header.stamp = ros::Time::now();
     msg.id = my_id;
+    msg.is_passive = false;
     msg.mass = model.mass;
     for (int r = 0; r < 3; r++) {
       for (int c = 0; c < 3; c++) {
@@ -1449,6 +1460,7 @@ namespace aerial_robot_control
     }
 
     BeetleUnifiedController::ModuleModelDescriptor model;
+    model.is_passive = msg.is_passive;
     model.mass = msg.mass;
     for (int r = 0; r < 3; r++) {
       for (int c = 0; c < 3; c++) {
@@ -2357,6 +2369,16 @@ namespace aerial_robot_control
     const double now = ros::Time::now().toSec();
 
     for (int module_id : assembled_ids) {
+      //add
+      BeetleUnifiedController::ModuleModelDescriptor model;
+      if (!unified_controller_->getModuleModelDescriptor(module_id, model)) {
+	status = "unavailable:missing_model_" +
+	  std::to_string(module_id);
+	formation_wrench.setZero();
+	return false;
+      }
+      if (model.is_passive) continue;
+      
       const auto wrench_it = module_wrenches.find(module_id);
       const auto stamp_it = receipt_stamps.find(module_id);
       const auto frame_it = frame_ids.find(module_id);
@@ -2642,13 +2664,16 @@ namespace aerial_robot_control
     rp_weight_sum.setZero();
 
     const std::vector<int> assembled_ids = beetle_navigator_->getAssemblyIds();
+ 
     if (assembled_ids.empty() || !unified_controller_) return false;
 
     const std::string robot_name = beetle_navigator_->getMyName();
     const Eigen::Vector3d formation_cog_offset =
         unified_controller_->getFormationCogOffset();
-    const Eigen::Matrix3d cog_from_body =
-        robot_model_->getCogDesireOrientation<Eigen::Matrix3d>();
+    // const Eigen::Matrix3d cog_from_body =
+    //    robot_model_->getCogDesireOrientation<Eigen::Matrix3d>();
+    const Eigen::Matrix3d D =
+    robot_model_->getCogDesireOrientation<Eigen::Matrix3d>();
 
     double roll_err_sum = 0.0;
     double pitch_err_sum = 0.0;
@@ -2662,14 +2687,14 @@ namespace aerial_robot_control
               module_id, module_mass, module_inertia)) {
         return false;
       }
-
-      const std::string module_cog_frame =
-          robot_name + std::to_string(module_id) + "/cog";
+ 
+      const std::string module_root_frame =
+          robot_name + std::to_string(module_id) + "/root";
 
       geometry_msgs::TransformStamped world_tf;
       try {
         world_tf = beetle_navigator_->getTfBuffer().lookupTransform(
-            "world", module_cog_frame, ros::Time(0));
+            "world", module_root_frame, ros::Time(0));
       } catch (tf2::TransformException& ex) {
         ROS_WARN_THROTTLE(
             1.0,
@@ -2678,35 +2703,98 @@ namespace aerial_robot_control
         return false;
       }
 
-      Eigen::Vector3d module_offset;
-      if (!unified_controller_->getModuleBodyOffsetFromLeader(
-              module_id, module_offset)) {
-        return false;
-      }
-      Eigen::Vector3d d = module_offset - formation_cog_offset;
-      Eigen::Matrix3d inertia_about_form =
-          module_inertia +
-          module_mass * (d.dot(d) * Eigen::Matrix3d::Identity() -
-                         d * d.transpose());
-      inertia_about_form =
-          cog_from_body * inertia_about_form * cog_from_body.transpose();
+      // Eigen::Vector3d module_offset;
+      // if (!unified_controller_->getModuleBodyOffsetFromLeader(
+      //         module_id, module_offset)) {
+      //   return false;
+      // }
+      // Eigen::Vector3d d = module_offset - formation_cog_offset;
+      // + Eigen::Matrix3d R_Li;
+      // if (!unified_controller_->getModuleRotationFromLeader(module_id, R_Li)) {
+      // 	return false;
+      // }
+      // // Eigen::Matrix3d inertia_about_form =
+      // //     module_inertia +
+      // //     module_mass * (d.dot(d) * Eigen::Matrix3d::Identity() -
+      // //                    d * d.transpose());
+      // // inertia_about_form =
+      // //     cog_from_body * inertia_about_form * cog_from_body.transpose();
 
-      const double roll_weight = inertia_about_form(0, 0);
-      const double pitch_weight = inertia_about_form(1, 1);
+      // const double roll_weight = inertia_about_form(0, 0);
+      // const double pitch_weight = inertia_about_form(1, 1);
+      Eigen::Vector3d module_offset;
+      Eigen::Matrix3d R_Li;
+
+      if (!unified_controller_->getModuleBodyOffsetFromLeader(
+							      module_id, module_offset) ||
+	  !unified_controller_->getModuleRotationFromLeader(
+							    module_id, R_Li)) {
+	return false;
+      }
+      
+      const Eigen::Vector3d d =
+	module_offset - formation_cog_offset;
+
+      const Eigen::Matrix3d inertia_leader =
+	R_Li * module_inertia * R_Li.transpose();
+
+      const Eigen::Matrix3d inertia_about_formation =
+	inertia_leader +
+	module_mass * (
+		       d.squaredNorm() * Eigen::Matrix3d::Identity()
+		       - d * d.transpose());
+
+      const Eigen::Matrix3d inertia_cog =
+	D * inertia_about_formation * D.transpose();
+
+      const double roll_weight = inertia_cog(0, 0);
+      const double pitch_weight = inertia_cog(1, 1);
+
+      if (!std::isfinite(roll_weight) ||
+	  !std::isfinite(pitch_weight) ||
+	  roll_weight <= 1e-9 ||
+	  pitch_weight <= 1e-9) {
+	return false;
+      }
       if (!std::isfinite(roll_weight) || !std::isfinite(pitch_weight) ||
           roll_weight <= 1e-9 || pitch_weight <= 1e-9) {
         return false;
       }
 
-      tf::Quaternion module_quat;
-      tf::quaternionMsgToTF(world_tf.transform.rotation, module_quat);
+      // tf::Quaternion module_quat;
+      // tf::quaternionMsgToTF(world_tf.transform.rotation, module_quat);
+      // double module_roll, module_pitch, module_yaw;
+      // tf::Matrix3x3(module_quat).getRPY(module_roll, module_pitch, module_yaw);
+      const auto& q_msg = world_tf.transform.rotation;
+      Eigen::Quaterniond q_W_Ci(
+				q_msg.w, q_msg.x, q_msg.y, q_msg.z);
+      if (!q_W_Ci.coeffs().allFinite() ||
+	  q_W_Ci.norm() < 1e-8) {
+	return false;
+      }
+
+      q_W_Ci.normalize();
+      const Eigen::Matrix3d R_W_CL =
+	q_W_Ci.toRotationMatrix()
+	 * R_Li.transpose() * D.transpose();
+
+      Eigen::Quaterniond q_W_CL(R_W_CL);
+      q_W_CL.normalize();
+
+      const tf::Quaternion q_tf(
+				q_W_CL.x(), q_W_CL.y(),
+				q_W_CL.z(), q_W_CL.w());
+
       double module_roll, module_pitch, module_yaw;
-      tf::Matrix3x3(module_quat).getRPY(module_roll, module_pitch, module_yaw);
 
+      tf::Matrix3x3(q_tf).getRPY(
+				 module_roll, module_pitch, module_yaw);
       const double roll_err =
-          angles::shortest_angular_distance(module_roll, target_rpy.x());
-      const double pitch_err = target_rpy.y() - module_pitch;
-
+	angles::shortest_angular_distance(module_roll, target_rpy.x());
+      //const double pitch_err = target_rpy.y() - module_pitch;
+      const double pitch_err =
+	angles::shortest_angular_distance(module_pitch, target_rpy.y());
+      
       roll_err_sum += roll_weight * roll_err;
       pitch_err_sum += pitch_weight * pitch_err;
       roll_sum += roll_weight * module_roll;
@@ -2741,9 +2829,22 @@ namespace aerial_robot_control
     }
 
     const std::vector<int> assembled_ids = beetle_navigator_->getAssemblyIds();
+    std::vector<int> active_ids;
+
+    for (int id : assembled_ids) {
+      BeetleUnifiedController::ModuleModelDescriptor model;
+      if (!unified_controller_->getModuleModelDescriptor(id, model)) {
+        return;
+      }
+
+      if (!model.is_passive) {
+        active_ids.push_back(id);
+      }
+    }
+
     const std::map<int, BeetleUnifiedController::ModuleCommand> module_commands =
         unified_controller_->getModuleCommands();
-    const int module_num = static_cast<int>(assembled_ids.size());
+    const int module_num = static_cast<int>(active_ids.size());
     if (module_num <= 1 || module_commands.empty()) return;
 
     int local_index = -1;
@@ -2754,9 +2855,9 @@ namespace aerial_robot_control
     double min_mean = 0.0;
     double max_mean = 0.0;
     for (int m = 0; m < module_num; m++) {
-      if (assembled_ids[m] == beetle_navigator_->getMyID()) local_index = m;
+      if (active_ids[m] == beetle_navigator_->getMyID()) local_index = m;
 
-      const auto cmd_it = module_commands.find(assembled_ids[m]);
+      const auto cmd_it = module_commands.find(active_ids[m]);
       if (cmd_it == module_commands.end() || cmd_it->second.full_thrusts.empty()) return;
 
       double thrust_sum = 0.0;
@@ -2821,7 +2922,7 @@ namespace aerial_robot_control
     means_ss << std::fixed << std::setprecision(2);
     for (int m = 0; m < module_num; m++) {
       if (m > 0) means_ss << ",";
-      means_ss << assembled_ids[m] << ":" << module_means[m];
+      means_ss << active_ids[m] << ":" << module_means[m];
     }
     const std::string module_means_str = means_ss.str();
 
@@ -3097,17 +3198,27 @@ namespace aerial_robot_control
     }
     const Eigen::Vector3d& cog_offset_leader_frame = unified_controller_->getFormationCogOffset();
     Eigen::Vector3d cog_offset_self = cog_offset_leader_frame;
+    Eigen::Vector3d module_offset_from_leader;
+    Eigen::Matrix3d R_Li;
     if (!is_leader) {
       // Convert leader-frame offset to this module's baselink frame.
       // Rigid assembly ⇒ all modules share the same body orientation, so the
       // formation CoG offset expressed in this module's frame is simply
       // (leader→formation_CoG) − (leader→my_CoG), all in the common orientation.
       markUnifiedDebugStage("follower_tf_lookup_enter");
-      Eigen::Vector3d module_offset_from_leader;
-      if (unified_controller_->getModuleBodyOffsetFromLeader(
-              my_id, module_offset_from_leader)) {
-        cog_offset_self -= module_offset_from_leader;
-        markUnifiedDebugStage("follower_tf_lookup_ok");
+      const bool offset_ok =
+        unified_controller_->getModuleBodyOffsetFromLeader(
+            my_id, module_offset_from_leader);
+      const bool rotation_ok =
+        unified_controller_->getModuleRotationFromLeader(
+            my_id, R_Li);
+
+      if (// unified_controller_->getModuleBodyOffsetFromLeader(
+          //     my_id, module_offset_from_leader
+	  offset_ok && rotation_ok) {
+      // cog_offset_self -= module_offset_from_leader;
+      cog_offset_self =R_Li.transpose() *(cog_offset_leader_frame -module_offset_from_leader);
+      markUnifiedDebugStage("follower_tf_lookup_ok");
       } else {
         // Soft fallback: keep leader-frame offset. One-frame positional bias is
         // vastly safer than a full thrust drop-out from early-return. The next
@@ -3147,31 +3258,87 @@ namespace aerial_robot_control
       const tf::Vector3& lt_ang_acc = leader_target_ang_acc_snapshot;
 
       // Recompute target_rot with leader's RPY (rigid assembly ⇒ shared orientation).
-      target_rpy_ = lt_rpy;
-      target_rot.setRPY(target_rpy_.x(), target_rpy_.y(), target_rpy_.z());
-      target_baselink_rpy = lt_final_baselink_rpy;
-      target_baselink_rpy.setZ(target_rpy_.z());
-      target_baselink_rot.setRPY(target_baselink_rpy.x(),
-                                 target_baselink_rpy.y(),
-                                 target_baselink_rpy.z());
+      // target_rpy_ = lt_rpy;
+      // target_rot.setRPY(target_rpy_.x(), target_rpy_.y(), target_rpy_.z());
+      // target_baselink_rpy = lt_final_baselink_rpy;
+      // target_baselink_rpy.setZ(target_rpy_.z());
+      // target_baselink_rot.setRPY(target_baselink_rpy.x(),
+      //                            target_baselink_rpy.y(),
+      //                            target_baselink_rpy.z());
 
-      tf::Vector3 delta_body(cog_offset_leader_frame.x() - cog_offset_self.x(),
-                             cog_offset_leader_frame.y() - cog_offset_self.y(),
-                             cog_offset_leader_frame.z() - cog_offset_self.z());
-      tf::Vector3 delta_world      = target_baselink_rot * delta_body;
+      // tf::Vector3 delta_body(cog_offset_leader_frame.x() - cog_offset_self.x(),
+      //                        cog_offset_leader_frame.y() - cog_offset_self.y(),
+      //                        cog_offset_leader_frame.z() - cog_offset_self.z());
+      // tf::Vector3 delta_world      = target_baselink_rot * delta_body;
+      // LEADERの目標body姿勢
+      tf::Matrix3x3 leader_target_body_rot;
+      leader_target_body_rot.setRPY(
+				    lt_final_baselink_rpy.x(),
+				    lt_final_baselink_rpy.y(),
+				    lt_rpy.z());
+
+      // R_Li: FOLLOWER body → LEADER body
+      tf::Matrix3x3 R_Li_tf;
+      tf::matrixEigenToTF(R_Li, R_Li_tf);
+
+      // FOLLOWERの目標body姿勢
+      target_baselink_rot =
+	leader_target_body_rot * R_Li_tf;
+
+      // FOLLOWERの目標仮想CoG姿勢
+      target_rot =
+	target_baselink_rot *
+	tf::Matrix3x3(cog2baselink_rot).inverse();
+
+      double roll, pitch, yaw;
+      target_rot.getRPY(roll, pitch, yaw);
+      target_rpy_.setValue(roll, pitch, yaw);
+      // module_offset_from_leader はLEADER body座標系
+      tf::Vector3 delta_body(
+			     module_offset_from_leader.x(),
+			     module_offset_from_leader.y(),
+			     module_offset_from_leader.z());
+
+      // LEADERの目標姿勢でworld座標系へ変換
+      tf::Vector3 delta_world =
+	leader_target_body_rot * delta_body;
+      
       tf::Vector3 lt_omega_world   = target_rot * lt_omega;
       tf::Vector3 lt_ang_acc_world = target_rot * lt_ang_acc;
 
+      // target_pos_ = lt_pos + delta_world;
+      // target_vel_ = lt_vel + lt_omega_world.cross(delta_world);
+      // target_acc_ = lt_acc + lt_ang_acc_world.cross(delta_world)
+      //             + lt_omega_world.cross(lt_omega_world.cross(delta_world));
+      // Module CoG position target
       target_pos_ = lt_pos + delta_world;
-      target_vel_ = lt_vel + lt_omega_world.cross(delta_world);
-      target_acc_ = lt_acc + lt_ang_acc_world.cross(delta_world)
-                  + lt_omega_world.cross(lt_omega_world.cross(delta_world));
+
+      // Formation CoG velocity/acceleration targets
+      target_vel_ = lt_vel;
+      target_acc_ = lt_acc;
 
       target_omega    = lt_omega;
       target_omega_   = cog_rot.inverse() * target_rot * target_omega;
       target_ang_acc_ = lt_ang_acc;
       markUnifiedDebugStage("follower_reference_ready");
     }
+    //add
+    double yaw_err = std::atan2(
+    std::sin(target_rpy_.z() - rpy_.z()),
+    std::cos(target_rpy_.z() - rpy_.z())
+);
+
+ROS_WARN_THROTTLE(
+    1.0,
+    "[UnifiedYawDiag] id=%d nav=%d "
+    "target_yaw=%.3f measured_yaw=%.3f "
+    "error=%.3f",
+    my_id,
+    navigator_->getNaviState(),
+    target_rpy_.z(),
+    rpy_.z(),
+    yaw_err
+);
     tf::Vector3 offset_body(cog_offset_self.x(), cog_offset_self.y(), cog_offset_self.z());
     // The formation geometry is rigidly attached to the physical baselink.
     // cog_rot is the virtual control-frame attitude and intentionally remains
@@ -3587,6 +3754,29 @@ namespace aerial_robot_control
     // --- Build 6-DOF target wrench in acceleration space ---
     markUnifiedDebugStage("target_wrench_build_enter");
     tf::Matrix3x3 uav_rot = estimator_->getOrientation(Frame::COG, estimate_mode_);
+    //add
+    if (!is_leader) {
+    Eigen::Matrix3d R_Li;
+    if (!unified_controller_->getModuleRotationFromLeader(
+            my_id, R_Li)) {
+        ROS_ERROR_THROTTLE(
+            1.0,
+            "[UnifiedCtrl] Cannot obtain module rotation");
+        return;
+    }
+
+    const Eigen::Matrix3d D =
+        robot_model_->getCogDesireOrientation<Eigen::Matrix3d>();
+
+    Eigen::Matrix3d R_W_Ci;
+    tf::matrixTFToEigen(uav_rot, R_W_Ci);
+
+    // Follower CoG姿勢をLeader CoG姿勢へ変換
+    const Eigen::Matrix3d R_W_CL =
+        R_W_Ci * D * R_Li.transpose() * D.transpose();
+
+    tf::matrixEigenToTF(R_W_CL, uav_rot);
+}
     tf::Vector3 target_acc_w(pid_controllers_.at(X).result(),
                              pid_controllers_.at(Y).result(),
                              pid_controllers_.at(Z).result());

@@ -15,11 +15,17 @@ class AssemblyDemo():
     def main(self):
         sm_top = smach.StateMachine(outcomes=['succeeded','interupted'])
         with sm_top:
-            for i,item in enumerate(self.module_ids):
-                if i == 0:
-                    continue
-                target_follower_id = self.module_ids[i]
-                target_leader_id = self.module_ids[i-1]
+            # for i,item in enumerate(self.module_ids):
+            #     if i == 0:
+            #         continue
+            #     target_follower_id = self.module_ids[i]
+            #     target_leader_id = self.module_ids[i-1]
+            #     motion_prefix = str(target_follower_id) + '_' + str(target_leader_id)
+            assembly_pairs = [(1, 'beetle2', 2, -1),(3, 'beetle2', 2,  1)]
+            for i, (target_follower_id,
+                    target_leader_name,
+                    target_leader_id,
+                    direction) in enumerate(assembly_pairs):
                 motion_prefix = str(target_follower_id) + '_' + str(target_leader_id)
                 sub_sm = smach.StateMachine(outcomes=['succeeded_'+motion_prefix,'interupted_'+motion_prefix])
                 # module_ids order represents X-axis position from small to large
@@ -27,19 +33,22 @@ class AssemblyDemo():
                 # leader (previous in list) is at smaller X, its male side (+X) faces follower
                 # follower (current in list) is at larger X, its female side (-X) faces leader
                 # So leader has the male side for docking, attach_dir = +1
-                direction = 1
+                #direction = 1
                 with sub_sm:
                     smach.StateMachine.add('StandbyState'+ motion_prefix,
-                                           StandbyState(robot_name = 'beetle'+str(target_follower_id), robot_id = target_follower_id, leader = 'beetle'+str(target_leader_id), leader_id = target_leader_id, attach_dir = direction, real_machine = self.real_machine),
+                                           StandbyState(robot_name = 'beetle'+str(target_follower_id), robot_id = target_follower_id, leader = target_leader_name# 'beetle'+str(target_leader_id)
+                                                        , leader_id = target_leader_id, attach_dir = direction, real_machine = self.real_machine),
                                            transitions={'done':'ApproachState' + motion_prefix, 'in_process': 'StandbyState'+motion_prefix, 'emergency':'interupted_'+motion_prefix})
 
                     smach.StateMachine.add('ApproachState' + motion_prefix,
-                                           ApproachState(robot_name = 'beetle'+str(target_follower_id), robot_id = target_follower_id, leader = 'beetle'+str(target_leader_id), leader_id = target_leader_id, attach_dir = direction, real_machine = self.real_machine),
+                                           ApproachState(robot_name = 'beetle'+str(target_follower_id), robot_id = target_follower_id, leader = target_leader_name# 'beetle'+str(target_leader_id)
+                                                         , leader_id = target_leader_id, attach_dir = direction, real_machine = self.real_machine),
                                            transitions={'done':'AssemblyState'+ motion_prefix, 'in_process':'ApproachState'+motion_prefix, 'fail':'StandbyState'+motion_prefix, 'emergency':'interupted_'+motion_prefix})
 
-                    smach.StateMachine.add('AssemblyState'+motion_prefix, AssemblyState(robot_name = 'beetle'+str(target_follower_id), robot_id = target_follower_id, leader = 'beetle'+str(target_leader_id), leader_id = target_leader_id, attach_dir = direction, real_machine = self.real_machine),
+                    smach.StateMachine.add('AssemblyState'+motion_prefix, AssemblyState(robot_name = 'beetle'+str(target_follower_id), robot_id = target_follower_id, leader = target_leader_name # 'beetle'+str(target_leader_id)
+                                                                                        , leader_id = target_leader_id, attach_dir = direction, real_machine = self.real_machine),
                                            transitions={'done':'succeeded_'+motion_prefix, 'emergency':'interupted_'+motion_prefix})
-                if(i == len(self.module_ids)-1):
+                if i == len(assembly_pairs) - 1:# (i == len(self.module_ids)-1):
                     smach.StateMachine.add('SUB'+str(i),
                                            sub_sm,
                                            transitions={'succeeded_'+motion_prefix:'succeeded', 'interupted_'+motion_prefix:'interupted'})

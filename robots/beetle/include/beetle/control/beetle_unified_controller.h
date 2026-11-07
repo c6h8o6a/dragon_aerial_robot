@@ -129,7 +129,10 @@ public:
    *  changes to re-arm side-effects such as the per-follower spinal one-shot
    *  cascade matrix. The leader's own one-shot is reset internally by
    *  updateFormationGeometry() itself. */
-  uint64_t getFormationRevision() const { return cached_module_model_revision_; }
+  // uint64_t getFormationRevision() const { return cached_module_model_revision_; }
+  //changed
+  uint64_t formation_geometry_revision_ = 0;
+  uint64_t getFormationRevision() const {return formation_geometry_revision_;}
 
   /** @brief Reset QP solver dimensions/solver internals when entering unified mode. */
   void resetQPState() {
@@ -144,6 +147,8 @@ public:
     prev_vectoring_f_.resize(0);
     last_qp_diag_log_time_ = -1.0;
     last_pinv_pwm_pred_pub_time_ = -1.0;
+    allocation_active_ids_.clear();
+    module_commands_.clear();
   }
 
   void setFormationModelOverride(double formation_mass,
@@ -180,8 +185,18 @@ public:
     std::map<int, int> rotor_direction;
     double mf_rate = 0.0;
 
+    bool is_passive = false;//add
+    
     bool valid(int motor_num) const
     {
+      if (is_passive){
+	return std::isfinite(mass) &&
+           mass > 0.0 &&
+           inertia.allFinite() &&
+           rotor_origins_from_cog.empty() &&
+           rotor_direction.empty() &&
+           mf_rate == 0.0;
+      } 
       if (!std::isfinite(mass) || mass <= 0.0 ||
           !inertia.allFinite() ||
           rotor_origins_from_cog.size() != static_cast<size_t>(motor_num) ||
@@ -211,6 +226,7 @@ public:
   /** @brief Return the latched leader-to-module offset in the common physical
    *  baselink/body frame. Falls back to a frame-corrected TF lookup before the
    *  formation geometry has been latched. */
+  bool getModuleModelDescriptor(int module_id, ModuleModelDescriptor& model) const;
   bool getModuleBodyOffsetFromLeader(int module_id, Eigen::Vector3d& offset) const;
   double getCandidateYawTerm() const { return candidate_yaw_term_; }
   Eigen::VectorXd getTargetVectoringForce() const;
@@ -238,6 +254,8 @@ public:
    */
   Eigen::VectorXd getAllocatedWrenchCog() const;
   bool getAllocatedModuleWrenchCog(int module_id, Eigen::VectorXd& allocated) const;
+  //add
+  bool getModuleRotationFromLeader(int module_id,Eigen::Matrix3d& rotation) const;
 
 private:
   ros::NodeHandle nh_;
@@ -335,11 +353,13 @@ private:
   Eigen::Matrix3d computeFormationInertia(
       const std::vector<int>& assembled_ids,
       const Eigen::Vector3d& formation_cog_offset);
-
-  bool getModuleModelDescriptor(int module_id, ModuleModelDescriptor& model) const;
   Eigen::Vector3d getModuleOffsetFromLeader(int module_id) const;
   bool lookupModuleOffsetFromLeader(int module_id, Eigen::Vector3d& offset) const;
   bool getCachedModuleOffsetFromLeader(int module_id, Eigen::Vector3d& offset) const;
+  //add
+  bool lookupModuleRotationFromLeader(int module_id,Eigen::Matrix3d& rotation) const;
+  bool getCachedModuleRotationFromLeader(int module_id,Eigen::Matrix3d& rotation) const;
+  std::map<int, Eigen::Matrix3d>cached_module_rotations_from_leader_;
   std::vector<Eigen::MatrixXd> buildRotorMask() const;
   bool buildModuleTorqueAllocationMatrixInvLocked(
       int module_id, spinal::TorqueAllocationMatrixInv& msg) const;
@@ -431,6 +451,7 @@ private:
                          const Eigen::VectorXd& feedback_weights,
                          const Eigen::VectorXd& w_priority,
                          const Eigen::VectorXd& secondary_ref,
+			 const std::vector<int>& active_ids,
                          const std::vector<int>& assembled_ids,
                          const Eigen::MatrixXd& interface_actuation_matrix,
                          const Eigen::VectorXd& interface_required_wrench,
@@ -565,6 +586,8 @@ private:
   bool battery_voltage_received_;
 
   void rosParamInit();
+  //add
+  std::vector<int> allocation_active_ids_;
 };
 
 } // namespace aerial_robot_control

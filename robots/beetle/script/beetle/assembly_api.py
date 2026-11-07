@@ -40,10 +40,10 @@ class StandbyState(smach.State):
                  lock_servo_angle_female = 3000,
                  leader = 'beetle2',
                  leader_id = 2,
-                 airframe_size = 0.52,
+                 airframe_size = 0.379,#0.52,
                  x_offset = 0.12,
                  y_offset = 0,
-                 z_offset = 0,
+                 z_offset = -0.084,#0
                  x_tol = 0.05,
                  y_tol = 0.05,
                  z_tol = 0.05,
@@ -174,8 +174,9 @@ class StandbyState(smach.State):
 
         # set target odom in leader coordinate
         #TODO: determine leader namespace dynamically
+        target_yaw = math.pi if self.robot_id == 1 else 0.0
         self.br.sendTransform((self.target_offset[0] + self.root_fc_dis[0], self.target_offset[1] +self.root_fc_dis[1], self.target_offset[2] + self.root_fc_dis[2]),
-                              tf.transformations.quaternion_from_euler(0, 0, 0),
+                              tf.transformations.quaternion_from_euler(0, 0, target_yaw),
                               rospy.Time.now(),
                               "follower_target_odom",
                               self.leader+"/root")
@@ -197,10 +198,37 @@ class StandbyState(smach.State):
         if(follower_from_leader[0][0] * self.target_offset[0] > 0 and
            abs(follower_from_leader[0][0]) <= abs(self.target_offset[0])):
             pos_error[0] = 0.0
-        att_error = np.array([0,0,0])-tf.transformations.euler_from_quaternion(follower_from_leader[1])
-
+        att_error = np.array([0,0,target_yaw])-tf.transformations.euler_from_quaternion(follower_from_leader[1])
+        att_error[2] = math.atan2(math.sin(att_error[2]),math.cos(att_error[2]))
+        pos_ok = np.all(np.abs(pos_error) < self.pos_error_tol)
+        att_ok = np.all(np.abs(att_error) < self.att_error_tol)
+        rospy.logwarn_throttle(
+            1.0,
+            "[Standby] robot=%s dir=%s current=%s target=%s pos_error=%s att_error=%s pos_ok=%s att_ok=%s" %
+            (
+                self.robot_name,
+                self.attach_dir,
+                follower_from_leader[0],
+                self.target_offset,
+                pos_error,
+                att_error,
+                pos_ok,
+                att_ok
+            )
+        )
+        
         #check if pos and att error are within the torrelance
         if np.all(np.less(np.abs(pos_error),self.pos_error_tol)) and np.all(np.less(np.abs(att_error),self.att_error_tol)):
+            rospy.logwarn(
+                "[%s] DONE robot=%s current=%s target=%s error=%s" %
+                (
+                    self.__class__.__name__,
+                    self.robot_name,
+                    follower_from_leader[0],
+                    self.target_offset,
+                    pos_error
+                )
+            )
             return 'done'
         elif self.emergency_flag:
             return 'emergency'
@@ -270,10 +298,10 @@ class ApproachState(smach.State):
                  lock_servo_angle_female = 3000,
                  leader = 'beetle2',
                  leader_id = 2,
-                 airframe_size = 0.52,
+                 airframe_size = 0.379, #0.2374+0.52
                  x_offset = 0,
                  y_offset = 0,
-                 z_offset = 0,
+                 z_offset = -0.084,#0
                  x_tol = 0.02,
                  y_tol = 0.02,
                  z_tol = 0.01,
@@ -372,8 +400,9 @@ class ApproachState(smach.State):
         #TODO: determine leader namespace dynamically
         # Add small offset toward leader for final approach (negative direction relative to attach_dir)
         approach_offset = 0.05
+        target_yaw = math.pi if self.robot_id == 1 else 0.0
         self.br.sendTransform((self.target_offset[0] - approach_offset * self.attach_dir + self.root_fc_dis[0], self.target_offset[1]+self.root_fc_dis[1] , self.target_offset[2] + self.root_fc_dis[2]),
-                              tf.transformations.quaternion_from_euler(0, 0, 0),
+                              tf.transformations.quaternion_from_euler(0, 0, target_yaw),
                               rospy.Time.now(),
                               "follower_target_odom",
                               self.leader+"/root")
@@ -392,7 +421,8 @@ class ApproachState(smach.State):
            abs(follower_from_leader[0][0]) <= abs(self.target_offset[0]) and
            abs(pos_error[0]) <= approach_offset):
             pos_error[0] = 0.0
-        att_error = att_error = np.array([0,0,0])-tf.transformations.euler_from_quaternion(follower_from_leader[1])
+        att_error = att_error = np.array([0,0,target_yaw])-tf.transformations.euler_from_quaternion(follower_from_leader[1])
+        att_error[2] = math.atan2(math.sin(att_error[2]),math.cos(att_error[2]))
 
         rospy.loginfo(pos_error)
 
@@ -553,7 +583,8 @@ class AssemblyState(smach.State):
             rospy.sleep(1.0)
         self.nav_msg.pos_xy_nav_mode= 6
         self.follower_nav_pub.publish(self.nav_msg)
-        self.leader_nav_pub.publish(self.nav_msg)
+        if self.leader != 'beetle2':
+            self.leader_nav_pub.publish(self.nav_msg)
         self.assembly_nav_pub.publish(self.nav_msg)
         rospy.sleep(1.0)
         self.flag_msg.key = str(self.robot_id)
