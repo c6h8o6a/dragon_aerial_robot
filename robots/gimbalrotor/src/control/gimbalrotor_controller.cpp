@@ -470,7 +470,7 @@ void GimbalrotorController::controlCore()
        * 1/2 w_lambda ||lambda - lambda_nom||^2
        * + 1/2 w_f sum_i (fx_i^2 + fy_i^2) */
       const double w_lambda = 1.0;
-      const double w_f = 10.0;
+      const double w_f = 1000.0;
 
       /* lambda cost */
       H.topLeftCorner(n_lambda, n_lambda) =w_lambda * Eigen::MatrixXd::Identity(n_lambda, n_lambda);
