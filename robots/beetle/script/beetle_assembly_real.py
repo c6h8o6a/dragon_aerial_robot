@@ -33,7 +33,7 @@ def parse_args():
                       help='Check TF, ModuleModel, and subscriber connections only')
     mode.add_argument('--confirm-assembled', action='store_true',
                       help='Confirm physical mechanical coupling and publish assembly flags')
-    parser.add_argument('--box-mass', type=float, default=1.5,
+    parser.add_argument('--box-mass', type=float, default=1.0,
                         help='Expected passive Box mass in kg (default: 1.5)')
     parser.add_argument('--timeout', type=float, default=15.0,
                         help='Timeout for each check in seconds (default: 15)')
