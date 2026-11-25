@@ -3,6 +3,7 @@
 
 <model name="box">
   <static>false</static>
+  <allow_auto_disable>false</allow_auto_disable>
   <!-- add_extra_module用接続位置 base_link to cog to model o-->
   <position>-0.3787 0.00004 0.08326</position>
 
