@@ -3804,7 +3804,7 @@ ROS_WARN_THROTTLE(
         constexpr int GRAVITY_RAMP_FRAMES = 40;
         gravity_ramp = std::min(static_cast<double>(unified_transition_count_) / GRAVITY_RAMP_FRAMES, 1.0);
       }
-      target_wrench_acc.head(3) += gravity_ramp * Eigen::Vector3d(gravity_cog.x(), gravity_cog.y(), gravity_cog.z());
+      //target_wrench_acc.head(3) += gravity_ramp * Eigen::Vector3d(gravity_cog.x(), gravity_cog.y(), gravity_cog.z());
     }
 
     // Spidar-style hover band: stabilize lateral force and roll/pitch moment

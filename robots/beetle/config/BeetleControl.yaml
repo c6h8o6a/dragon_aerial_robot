@@ -47,7 +47,7 @@ controller:
     # Short gate ramp: close to LF's quick observer engagement, without a hard step.
     ff_ramp_seconds: 1.0
 
-  yaw_in_allocation: true  # false: single-channel yaw (spinal-only), true: include yaw in QP
+  yaw_in_allocation: false  # false: single-channel yaw (spinal-only), true: include yaw in QP
 
   # Leader-only compact log for aerial towing validation. Prints only while a
   # nonzero formation_desired_wrench is active.
@@ -110,9 +110,9 @@ controller:
     d_gain: 0.07
     i_gain: 0.0
   xy:
-    p_gain: 10.0
+    p_gain: 5#10.0
     i_gain: 0.2
-    d_gain: 5.0       # 2026-09-09: XY D-only comparison for side-dependent takeoff oscillation
+    d_gain: 3#5.0       # 2026-09-09: XY D-only comparison for side-dependent takeoff oscillation
     err_d_lpf_cutoff_freq: 0.0  # 2026-09-15: B trial, disable XY D LPF only (baseline: 3.5 Hz)
     limit_sum: 8.0
     limit_p: 12.0
@@ -154,16 +154,16 @@ controller:
     start_rp_integration_height: 0.01
 
   yaw:
-    p_gain: 15.0
-    i_gain: 1.0
-    d_gain: 5.0
+    p_gain: 0#15.0
+    i_gain: 0#1.0
+    d_gain: 0#5.0
     limit_err_p: 0.4
     limit_sum: 20.0
     limit_p: 20.0
     limit_i: 5.0
     limit_d: 20.0
 
-    need_d_control: true
+    need_d_control: false
 
   # Unified-mode PID gains for roll/pitch.
   # Applied when entering unified control mode; restored on exit.
@@ -188,9 +188,9 @@ controller:
     limit_d: 20.0
 
   unified_xy:
-    p_gain: 10.0
+    p_gain: 5#10.0
     i_gain: 0.15
-    d_gain: 5.0      # B: 4→5, add damping for low-frequency assembly XY hover oscillation
+    d_gain: 3#5.0      # B: 4→5, add damping for low-frequency assembly XY hover oscillation
     err_d_lpf_cutoff_freq: 1.5  # A: 3.5→1.5 Hz, 抑制 1-3Hz 速度估计噪声放大成 target_pitch 抖动
     limit_sum: 8.0
     limit_p: 12.0
@@ -210,9 +210,9 @@ controller:
   # Full P+I+D on PC side. D-gain also sent to spinal for high-freq damping.
   # When yaw_in_allocation=true, yaw PID output participates in 6-DOF QP allocation.
   unified_yaw:
-    p_gain: 15.0
-    i_gain: 1.0
-    d_gain: 10.0
+    p_gain: 0#15.0
+    i_gain: 0#1.0
+    d_gain: 0#10.0
     limit_err_p: 0.4
     limit_sum: 20.0
     limit_p: 20.0
