@@ -25,7 +25,7 @@ CoG axes. Z position is NOT inferred from level-hover gravity moments.
 """
 
 import math
-
+from tf.transformations import euler_from_quaternion
 import rospy
 import rostopic
 import tf2_ros
@@ -130,6 +130,19 @@ class MassEstimationNode:
             rospy.Time(0), rospy.Duration(self.tf_timeout))
         return vec3(t)
 
+    def box_yaw(self):
+        t = self.tf_buffer.lookup_transform(
+            self.leader_frame,
+            self.box_root_frame,
+            rospy.Time(0),
+            rospy.Duration(self.tf_timeout))
+        
+        q = t.transform.rotation
+        _, _, yaw = euler_from_quaternion(
+            [q.x, q.y, q.z, q.w])
+        
+        return yaw
+
     @staticmethod
     def publish_xy(pub, x, y):
         pub.publish(Float64MultiArray(data=[x, y]))
@@ -206,8 +219,24 @@ class MassEstimationNode:
         box_G_y = box_root[1] - G_model_y
 
         # Payload location in BOX ROOT coordinates; estimated from gravity moments.
-        weight_box_x = weight_G_x - box_G_x
-        weight_box_y = weight_G_y - box_G_y
+        # 箱原点を基準としたリーダー座標軸上の位置
+        dx = weight_G_x - box_G_x
+        dy = weight_G_y - box_G_y
+
+        # 箱とリーダーの相対Yaw角
+        try:
+            yaw = self.box_yaw()
+        except (tf2_ros.LookupException,
+                tf2_ros.ConnectivityException,
+                tf2_ros.ExtrapolationException):
+            return
+        
+        c = math.cos(yaw)
+        s = math.sin(yaw)
+
+        # リーダー座標軸から箱座標軸へ回転
+        weight_box_x =  c * dx + s * dy
+        weight_box_y = -s * dx + c * dy
 
         # SDF assumption: nominal 1.5 kg box CoG is at box/root (inertial pose=0).
         fraction = dm / (self.box_model_mass + dm)
